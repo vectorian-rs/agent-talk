@@ -2,19 +2,28 @@ defmodule AgentTalk.Application do
   @moduledoc false
 
   use Application
+  require Logger
 
   @impl true
   def start(_type, _args) do
+    ttl_ms = Application.fetch_env!(:agent_talk, :node_ttl_ms)
+    history_limit = Application.fetch_env!(:agent_talk, :message_history_limit)
+
     children =
       [
         {Phoenix.PubSub, name: AgentTalk.PubSub},
-        {AgentTalk.Hub,
-         ttl_ms: Application.fetch_env!(:agent_talk, :node_ttl_ms), pubsub: AgentTalk.PubSub},
+        {AgentTalk.Hub, ttl_ms: ttl_ms, history_limit: history_limit, pubsub: AgentTalk.PubSub},
         {AgentTalk.Server, transport: {:streamable_http, start: true}},
         AgentTalk.Web.Endpoint
       ] ++ http_children()
 
     opts = [strategy: :one_for_one, name: AgentTalk.Supervisor]
+
+    Logger.info(
+      "AgentTalk config: #{Application.fetch_env!(:agent_talk, :config_file)}; " <>
+        "registration lease: #{div(ttl_ms, 1000)} seconds; message history: #{history_limit}"
+    )
+
     Supervisor.start_link(children, opts)
   end
 

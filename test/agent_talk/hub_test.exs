@@ -201,6 +201,26 @@ defmodule AgentTalk.HubTest do
     assert Enum.sort(recipients) == ["backend", "frontend"]
   end
 
+  test "configured history limit trims the log without truncating the inbox" do
+    hub =
+      start_supervised!(
+        Supervisor.child_spec({Hub, name: nil, history_limit: 2}, id: :limited_history)
+      )
+
+    pm = register(hub, "limited-pm", "pm")
+    worker = register(hub, "limited-worker")
+
+    for number <- 1..4 do
+      assert {:ok, _} =
+               send_message(hub, pm, %{to: [worker.node_id], message: "Message #{number}"})
+    end
+
+    assert {:ok, %{messages: history, history_limit: 2}} = Hub.snapshot(hub)
+    assert Enum.map(history, & &1.message) == ["Message 4", "Message 3"]
+    assert {:ok, %{messages: inbox}} = receive_messages(hub, worker)
+    assert Enum.map(inbox, & &1.message) == Enum.map(1..4, &"Message #{&1}")
+  end
+
   test "presence sweeps publish expiry without an incoming tool call", %{clock: clock} do
     pubsub = start_supervised!({Phoenix.PubSub, name: AgentTalk.HubTestPubSub})
     assert is_pid(pubsub)

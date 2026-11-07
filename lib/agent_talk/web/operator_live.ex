@@ -27,7 +27,12 @@ defmodule AgentTalk.Web.OperatorLive do
       |> Enum.sort()
 
     socket
-    |> assign(nodes: snapshot.nodes, messages: snapshot.messages, parties: parties)
+    |> assign(
+      nodes: snapshot.nodes,
+      messages: snapshot.messages,
+      history_limit: snapshot.history_limit,
+      parties: parties
+    )
     |> filter_messages()
   end
 
@@ -98,7 +103,7 @@ defmodule AgentTalk.Web.OperatorLive do
           </div>
           <dl class="console-stats">
             <div><dt>Active registrations</dt><dd id="agent-count">{length(@nodes)}</dd></div>
-            <div><dt>Messages retained</dt><dd><span id="message-count">{length(@messages)}</span><span class="stat-limit"> / 50</span></dd></div>
+            <div><dt>Messages retained</dt><dd><span id="message-count">{length(@messages)}</span><span class="stat-limit"> / {@history_limit}</span></dd></div>
           </dl>
         </section>
 
@@ -134,7 +139,7 @@ defmodule AgentTalk.Web.OperatorLive do
           <section class="messages-panel" aria-labelledby="messages-title">
             <div class="panel-heading messages-heading">
               <div><h2 id="messages-title">Message log</h2><p class="stream-caption">Newest first · UTC</p></div>
-              <span class="small-label retention-label">Last 50</span>
+              <span class="small-label retention-label">Last {@history_limit}</span>
             </div>
             <form id="message-filters" phx-change="filter" class="message-filters" role="search" aria-label="Filter messages">
               <label class="search-field">
@@ -182,7 +187,7 @@ defmodule AgentTalk.Web.OperatorLive do
             <p :if={@messages != []} class="stream-end">Showing {length(@visible_messages)} of {length(@messages)} retained messages.</p>
           </section>
         </div>
-        <footer class="operator-footer"><span>AgentTalk</span><span>Log: memory only · limit: 50</span></footer>
+        <footer class="operator-footer"><span>AgentTalk</span><span>Log: memory only · limit: {@history_limit}</span></footer>
       </main>
     </div>
     """

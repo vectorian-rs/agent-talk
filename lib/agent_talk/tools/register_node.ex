@@ -1,5 +1,9 @@
 defmodule AgentTalk.Tools.RegisterNode do
-  @moduledoc "Register an agent and return its private token. Supply that token when renewing an existing node."
+  @moduledoc """
+  Register an agent or renew its lease with its current token, preserving its inbox.
+  After expiry, registration creates a new token and empty inbox. Save every
+  successful response before another authenticated call, replacing saved credentials.
+  """
   use Anubis.Server.Component, type: :tool, name: "register_node"
 
   schema do
@@ -11,7 +15,10 @@ defmodule AgentTalk.Tools.RegisterNode do
     )
 
     field(:role, {:enum, ["pm", "implementation"]}, required: true)
-    field(:token, :string, description: "Token from the original registration, for renewals")
+
+    field(:token, :string,
+      description: "Token from the latest successful registration, for renewal"
+    )
   end
 
   @impl true

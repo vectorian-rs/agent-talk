@@ -11,10 +11,7 @@ config :agent_talk, AgentTalk.Web.Endpoint,
   live_view: [signing_salt: "agent-talk-live"],
   render_errors: [formats: [html: AgentTalk.Web.ErrorHTML], layout: false]
 
-config :agent_talk,
-  http_enabled: config_env() != :test,
-  port: 4000,
-  node_ttl_ms: 300_000
+config :agent_talk, http_enabled: config_env() != :test
 
 if config_env() == :dev do
   config :agent_talk, AgentTalk.Web.Endpoint,

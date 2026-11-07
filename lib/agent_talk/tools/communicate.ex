@@ -3,7 +3,9 @@ defmodule AgentTalk.Tools.Communicate do
   Send to one or many agents, or receive and remove all messages in your inbox.
   For send, supply message and either to (node IDs) or to_role (pm, implementation or all).
   Role broadcasts exclude the sender. Receive takes only action, node_id and token.
-  Every call renews your presence. Call receive periodically to collect tasks or replies.
+  Authenticated calls renew only the caller's lease; sends do not renew recipients.
+  A send queues messages; recipient expiry can discard them before collection.
+  Call receive between tasks to collect messages; use register_node for an idle heartbeat.
   """
   use Anubis.Server.Component, type: :tool, name: "communicate"
 

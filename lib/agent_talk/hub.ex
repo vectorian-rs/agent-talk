@@ -22,7 +22,14 @@ defmodule AgentTalk.Hub do
        nodes: %{},
        messages: [],
        pubsub: Keyword.get(opts, :pubsub),
-       ttl_ms: Keyword.get(opts, :ttl_ms, 300_000),
+       ttl_ms:
+         Keyword.get_lazy(opts, :ttl_ms, fn ->
+           Application.fetch_env!(:agent_talk, :node_ttl_ms)
+         end),
+       history_limit:
+         Keyword.get_lazy(opts, :history_limit, fn ->
+           Application.fetch_env!(:agent_talk, :message_history_limit)
+         end),
        max_inbox: Keyword.get(opts, :max_inbox, 1000),
        clock: Keyword.get(opts, :clock, fn -> System.monotonic_time(:millisecond) end)
      }}
@@ -45,7 +52,12 @@ defmodule AgentTalk.Hub do
   end
 
   defp dispatch(:snapshot, state, _now) do
-    data = %{nodes: public_nodes(state.nodes), messages: state.messages}
+    data = %{
+      nodes: public_nodes(state.nodes),
+      messages: state.messages,
+      history_limit: history_limit(state)
+    }
+
     {{:ok, data}, state}
   end
 
@@ -136,7 +148,7 @@ defmodule AgentTalk.Hub do
         end)
 
       event = Map.merge(message, %{to: recipients, from_role: node.role, received_by: []})
-      history = Enum.take([event | state.messages], 50)
+      history = Enum.take([event | state.messages], history_limit(state))
 
       {{:ok, %{message_id: message.id, delivered_to: recipients}},
        %{state | nodes: nodes, messages: history}}
@@ -199,6 +211,10 @@ defmodule AgentTalk.Hub do
   defp public_nodes(nodes) do
     nodes |> Map.values() |> Enum.sort_by(& &1.node_id) |> Enum.map(&public_node/1)
   end
+
+  defp history_limit(state),
+    do:
+      Map.get(state, :history_limit, Application.get_env(:agent_talk, :message_history_limit, 50))
 
   defp expire_nodes(state, now) do
     nodes = Map.reject(state.nodes, fn {_id, node} -> now - node.seen_at >= state.ttl_ms end)

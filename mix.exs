@@ -24,6 +24,7 @@ defmodule AgentTalk.MixProject do
       {:anubis_mcp, "~> 2.2.0"},
       {:bandit, "~> 1.0"},
       {:jason, "~> 1.4"},
+      {:toml_elixir, "~> 3.3"},
       {:phoenix, "~> 1.8.0"},
       {:phoenix_html, "~> 4.3"},
       {:phoenix_live_view, "~> 1.2.0"},

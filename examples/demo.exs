@@ -1,13 +1,14 @@
 # Run with: mix run examples/demo.exs
 # To watch an already running server:
-# AGENT_TALK_URL=http://127.0.0.1:4000 mix run --no-start examples/demo.exs
+# mix run --no-start examples/demo.exs --url http://127.0.0.1:4000
 alias Anubis.Client
 
 {:ok, _} = Application.ensure_all_started(:anubis_mcp)
 Logger.configure(level: :info)
 {:ok, _} = Finch.start_link(name: Anubis.Finch)
 
-external_url = System.get_env("AGENT_TALK_URL")
+{options, _args} = OptionParser.parse!(System.argv(), strict: [url: :string, config: :string])
+external_url = options[:url]
 base_url = external_url || "http://127.0.0.1:#{Application.fetch_env!(:agent_talk, :port)}"
 
 suffix =
