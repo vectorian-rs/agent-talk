@@ -1,9 +1,10 @@
 # AgentTalk
 
-A small Elixir MCP server for a PM coordinating implementation agents. Run one
+A small Elixir MCP server for a PM coordinating agents in an isolated ring. Run one
 shared server and point every agent at `http://127.0.0.1:4000/mcp`.
 
-Here, a **node is a registered AI agent**, with role `pm` or `implementation`.
+A **node** is a registered agent. A **ring** groups a PM and its invited agents.
+Agents declare their roles, such as `pm`, `worker` or `reviewer`.
 Presence uses a renewable lease: an agent is considered connected while its
 registration is active. The default lease lasts 24 hours (86,400 seconds).
 
@@ -36,7 +37,7 @@ JSON configuration:
 ```
 
 Every agent must use the same running server to share registrations and messages.
-Each agent registers its own unique ID and keeps the returned private token.
+The server assigns every agent an ID. Save its complete registration response privately.
 
 ## Configuration
 
@@ -90,154 +91,161 @@ in another terminal:
 mix run --no-start examples/demo.exs --url http://127.0.0.1:4000
 ```
 
-This connects to the existing server with unique demo agent names and sends only
-between those demo agents. Substitute your port if needed.
+This creates a separate demo ring on the existing server and sends only
+between its members. Substitute your port if needed.
 
 ## Three tools
 
 | Tool | Purpose |
 | --- | --- |
-| `register_node` | Register an agent, or renew its registration using its token. |
-| `list_nodes` | List active agents, optionally filtering by role. |
-| `communicate` | Send to one or many agents, or receive messages from your inbox. |
+| `register_node` | Create a ring, join through an invitation, or renew your membership. |
+| `list_nodes` | Discover active members of your ring, optionally filtered by role. |
+| `communicate` | Send within your ring, or receive messages from your inbox. |
 
-Examples below show **tool arguments**, which your MCP client wraps in `tools/call`.
+Examples show tool arguments, wrapped by the client in `tools/call`.
 
-Register the PM, then have each worker register with role `implementation` and
-its own `node_id`, such as `backend` or `frontend`:
-
-```json
-{"node_id": "pm", "role": "pm"}
-```
-
-The result includes `node_id`, `role`, `token`, and `expires_in_seconds`. Save
-**every successful registration response before another authenticated call**,
-including renewals and recovery after expiry. Replace previous credentials;
-if saving fails, stop. For files, use an atomic replacement with mode `0600`
-under the ignored `.agent-talk/<node-id>.json`. Serialize registration, saving
-and authenticated calls within each node's owning client. Never print tokens
-or include them in messages, logs or commits. `list_nodes` never exposes tokens.
-
-Discover all workers with `list_nodes`:
+A new PM creates a ring with one argument:
 
 ```json
-{"role": "implementation"}
+{"role": "pm"}
 ```
 
-The PM broadcasts through `communicate`:
+The response contains `node_id`, `ring_id`, `role`, a private node `token`, the
+shared `ring_token`, `expires_in_seconds` and `instructions`. PMs also receive
+`onboarding_prompt_template`. Fill its `<ROLE>` and `<RING_TOKEN>` placeholders
+to prepare another agent's private startup prompt. Never put the PM's private
+node token in that prompt.
+
+An invited agent chooses its role and joins:
 
 ```json
-{
-  "action": "send",
-  "node_id": "pm",
-  "token": "<pm-token>",
-  "to_role": "implementation",
-  "message": "Implement your part of the feature and reply when ready."
-}
+{"role": "worker", "ring_token": "<RING_TOKEN_FROM_PM>"}
 ```
 
-For selected recipients, replace `to_role` with `"to": ["backend", "frontend"]`.
-Use `"to_role": "all"` to reach every other active agent. Role broadcasts exclude
-the sender. A successful send returns a shared `message_id` and `delivered_to`.
+Roles use 1..64 letters, digits, underscores, dots or hyphens; `all` is reserved
+for broadcasts. Roles are declared labels, not authorization or human approval.
+Joining returns a new ID and private token. IDs are assigned from a monotonic
+counter and never reused within the running Erlang VM, including after node
+expiry or a hub restart. Clients cannot choose IDs.
 
-Each worker polls its inbox through the same `communicate` tool:
+**Save every successful registration response before another authenticated
+call.** Replace the previous credentials atomically with file mode `0600`, using
+a stable local session name such as `.agent-talk/pm.json` or `.agent-talk/w-1.json`.
+The folder is ignored. Each session owns its file; never print credentials in
+logs, commits or issue comments. Share only the ring invitation in private
+onboarding prompts. Both tokens are generated from 32 random bytes hashed with
+SHA-256. The ring token admits members; the private token authenticates one node.
+
+Discover members using your assigned ID and private token:
 
 ```json
-{"action": "receive", "node_id": "backend", "token": "<backend-token>"}
+{"node_id": "<YOUR_ID>", "token": "<YOUR_PRIVATE_TOKEN>", "role": "worker"}
 ```
 
-Receive returns messages in arrival order, including `id`, `from`, `message`,
-and `sent_at`, then empties that inbox. A worker replies to the PM:
+Omit `role` to list every active member of your ring. Neither token appears in
+these results. The PM broadcasts through `communicate`:
 
 ```json
 {
   "action": "send",
-  "node_id": "backend",
-  "token": "<backend-token>",
-  "to": ["pm"],
-  "message": "Backend implementation is ready for review."
+  "node_id": "<PM_ID>",
+  "token": "<PM_PRIVATE_TOKEN>",
+  "to_role": "worker",
+  "message": "Implement your assigned part and reply when ready."
 }
 ```
 
-The PM reads replies using `communicate` with `action: "receive"` and its own credentials.
+Use `to: ["<DISCOVERED_ID>", "<ANOTHER_ID>"]` for selected members, or
+`to_role: "all"` for every other member. Broadcasts exclude the sender.
+Discovery, direct sends and broadcasts cannot cross rings. An invalid recipient
+rejects the whole send. Workers receive with their own credentials:
+
+```json
+{"action": "receive", "node_id": "<YOUR_ID>", "token": "<YOUR_PRIVATE_TOKEN>"}
+```
+
+Receive returns FIFO messages with `id`, `from`, `ring_id`, `message` and
+`sent_at`, then empties the inbox. Reply using `action: "send"` and the PM's
+**discovered or invited ID**. Project labels such as CeleraTax's `w-1` remain
+separate from the server-assigned transport ID.
+
+## Startup prompts
+
+For a new PM session:
+
+```text
+Follow this project's PM instructions. Resume this session's saved AgentTalk
+registration, or create a ring with register_node(role="pm"). Follow the returned
+instructions and prepare onboarding prompts from its template. The human starts
+other sessions; do not start them yourself.
+```
+
+For an invited agent, use the PM's returned template with its ring token and the
+agent's chosen role. The server's initialization instructions, tool descriptions
+and registration response explain the protocol; no extra onboarding tool is needed.
 
 ## Leases and recovery
 
-The TOML setting `node_ttl_seconds` controls the lease. The application converts
-it to milliseconds for the hub. Verify `expires_in_seconds: 86400` in a successful
-registration response when using the default configuration. A running hub keeps
-its startup settings; changing a file does not alter active registrations.
+The default membership lease is 86,400 seconds; use the returned duration.
+Authenticated `list_nodes`, `communicate` and renewal reset only the caller's
+lease. Discovery and communication do this even if later argument validation
+fails. Incoming messages and open MCP connections do not renew a recipient.
 
-| Event | Lease, token and inbox |
+Renew an active membership with the same role, ID and private token:
+
+```json
+{"role": "worker", "node_id": "<YOUR_ID>", "token": "<YOUR_PRIVATE_TOKEN>"}
+```
+
+Renewal preserves both tokens, ID, ring and inbox. Roles and rings cannot be
+changed through renewal. An idle host timer can renew around every third of the
+lease duration, without an LLM turn or endless agent polling. `receive` drains
+messages, so use registration for a heartbeat.
+
+Expiry occurs at the exact lease boundary; calls remove expired nodes before
+acting, and a one-second sweep removes idle members. Expiry discards the node's
+inbox. Rejoin with **role and saved ring_token**, save the new ID/token, rediscover
+members and reconcile work with the project's durable record. An expired ID
+cannot be renewed or reclaimed. A fresh role-only PM call creates a different
+ring. Rings and invitations remain valid until the server restarts.
+
+| Tool error | Recovery |
 | --- | --- |
-| Registration on a free or expired ID | New token and empty inbox; any supplied old token is ignored. |
-| Registration before expiry | Current token required; preserves token and inbox, resets the full lease. |
-| Authenticated `communicate` | Resets only the caller's lease, even if send/receive argument validation fails. |
-| Incorrect token, discovery, open MCP session, incoming message | Does not extend that node's lease. |
+| `invalid ring token` | Get the current invitation from the PM; a server restart invalidates old rings. |
+| `invalid node token` | Reload this session's saved credentials. If lost, rejoin with the invitation as a new identity and notify the PM; this does not take over the old ID. |
+| `node is not registered or has expired; join again with role and ring_token` | Rejoin the same ring, save the new identity and recover assigned work. |
+| `unknown or expired recipients: …` / `no matching recipients` | Discover current members in your ring before retrying. Nothing was queued. |
 
-Expiry occurs at the exact boundary `last authenticated activity + TTL`. Every
-hub call removes expired nodes before acting; a one-second sweep also removes
-idle nodes. Expiry, registration, authentication and fan-out are serialized in
-one GenServer. Concurrent re-registrations of an expired ID have one winner.
+These are `isError: true` tool results, not transport failures. There is no
+unauthenticated reset of another node's token. An inbox holds 1,000 messages;
+a message is limited to 65,536 UTF-8 bytes. `delivered_to` means queued at that
+instant, not collected or completed: recipient expiry can discard a just-queued
+message. Require an application-level reply before treating a handoff as
+accepted. Operator history can still show the uncollected send afterward.
 
-An idle **host/client timer** can renew with `register_node` at roughly one third
-of the returned lease duration. Use the latest saved token and save each response.
-This needs no LLM turn or endless agent polling. Registration preserves the
-inbox; `receive` drains it. Without a timer, choose a lease long enough for normal
-pauses and re-register on resume after expiry. Healthy MCP connectivity and an
-open Pi session do not maintain presence or wake agents. Check `receive` between
-tasks or when the operator resumes the agent.
-
-| Tool error text | Recovery |
-| --- | --- |
-| `node is not registered or has expired; call register_node` | Re-register and save the response; recover assigned work from the project's durable record. |
-| `invalid node token` | Reload the latest saved registration response. |
-| `node_id is already registered; its token is required to renew it` | Resume the owning client with its current token. If lost, stop stale retries and wait for expiry, or ask the operator to approve a distinct ID and update addressing. |
-| `unknown or expired recipients: …` / `no matching recipients` | Resume and re-register intended recipients before retrying. Failed fan-out queues nothing. |
-
-These are `isError: true` tool results, not transport failures. Absent and expired
-IDs share an error because expired records are deleted. There is no token reset
-or unauthenticated takeover of an active ID. Do not restart a shared server to
-recover one node's credentials.
-
-A successful send means queued **at that instant**. It does not renew recipients:
-expiry can discard a just-queued message, while operator history still shows it
-as uncollected. Require a worker's application-level reply before treating a
-handoff as accepted. Keep assignments in the project's durable work record and
-reconcile it after expiry; do not blindly resend work that may have been acted on.
-
-## Behavior
-
-- Sends are atomic across recipients. Unknown recipients, no matching role, or a
-  full inbox reject the send. Duplicate recipients receive one copy.
-- An inbox holds up to 1,000 messages; each message is at most 65,536 UTF-8 bytes.
-- `delivered_to` means queued. Agents must poll and execute tasks themselves.
-  Receiving removes messages before the HTTP response reaches the client; this
-  minimal server has no acknowledgment, retry deduplication, or durable delivery.
-- The HTTP listener binds to `127.0.0.1` for trusted local clients. Registration
-  tokens protect agent identities; deploying across machines needs an authenticated
-  HTTPS boundary and an appropriate origin allowlist.
+The operator UI observes all rings without draining inboxes or exposing tokens.
+History, rings, credentials and inboxes are in memory. A full server restart
+loses them all; coordinate it with the operator. The HTTP listener binds to
+`127.0.0.1` for trusted local use. Remote deployment needs an authenticated HTTPS
+boundary and an appropriate browser-origin allowlist.
 
 ## Demo and checks
 
-With port 4000 free, run a self-contained PM → two workers → PM exchange over
-real MCP HTTP connections. The demo starts its own server and exits afterward:
+Run an isolated PM → two workers → PM exchange on an automatically assigned port:
 
 ```sh
-mix run examples/demo.exs
+mix run --no-start examples/demo.exs
 ```
 
-For registration, renewal, idle expiry, stale-token rejection, mailbox loss and
-recovered delivery with **three independent MCP clients**:
+For a three-client smoke test covering invitations, renewal, expiry, fresh IDs,
+mailbox loss, recovered delivery and ring isolation:
 
 ```sh
 mix run --no-start examples/lease_smoke.exs
 ```
 
-This starts its own hub and HTTP listener on an OS-assigned loopback port. It
-never connects to or restarts the trial server. It prints checks without tokens,
-keeps credentials in memory, and exits after about five seconds. It sets a
-two-second lease only inside its own process, without changing any config file.
+The smoke test uses its own hub, port and two-second lease without changing
+config files, connecting to the trial server or printing tokens.
 
 ```sh
 mix format --check-formatted
@@ -245,7 +253,5 @@ mix compile --warnings-as-errors
 mix test
 ```
 
-The project uses [Anubis MCP](https://hexdocs.pm/anubis_mcp/readme.html) for protocol
-handling, Bandit for HTTP, a supervised GenServer for registration and mailboxes,
-and [Phoenix LiveView](https://hexdocs.pm/phoenix_live_view/Phoenix.LiveView.html)
-for the live operator UI. The MCP interface still exposes exactly three tools.
+Built with [Anubis MCP](https://hexdocs.pm/anubis_mcp/readme.html), Bandit,
+Phoenix LiveView/PubSub and a supervised GenServer. The MCP API has three tools.

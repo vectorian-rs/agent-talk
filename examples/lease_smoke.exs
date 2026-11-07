@@ -1,7 +1,6 @@
 # mix run --no-start examples/lease_smoke.exs
-# Own hub and ephemeral port; never connects to the trial server.
+# Own hub, short lease and ephemeral port; never connects to the trial server.
 alias Anubis.Client
-
 verify = fn condition, message -> if !condition, do: raise(message) end
 
 verify.(
@@ -9,11 +8,10 @@ verify.(
   "Run with mix run --no-start"
 )
 
-# Override only this isolated process; leave the operator's config files untouched.
 ttl_ms = 2000
 Application.put_env(:agent_talk, :node_ttl_ms, ttl_ms)
-Logger.configure(level: :warning)
 Application.put_env(:agent_talk, :http_enabled, false)
+Logger.configure(level: :warning)
 {:ok, _} = Application.ensure_all_started(:agent_talk)
 {:ok, _} = Finch.start_link(name: Anubis.Finch)
 
@@ -33,64 +31,81 @@ end
 expect_error = fn client, tool, args, expected ->
   case Client.call_tool(client, tool, args) do
     {:ok, %{is_error: true, result: result}} ->
-      verify.(Enum.any?(result["content"], &(&1["text"] == expected)), "Unexpected #{tool} error")
+      verify.(
+        Enum.any?(result["content"], &String.starts_with?(&1["text"], expected)),
+        "Unexpected #{tool} error"
+      )
 
     _ ->
       raise "Expected #{tool} failure (response omitted to protect credentials)"
   end
 end
 
-auth = fn node, fields ->
-  Map.merge(%{node_id: node["node_id"], token: node["token"]}, fields)
-end
+auth = fn node, fields -> Map.merge(%{node_id: node["node_id"], token: node["token"]}, fields) end
 
 renew = fn client, node ->
   fresh = call.(client, "register_node", Map.take(node, ["node_id", "role", "token"]))
-  verify.(fresh["expires_in_seconds"] == ttl_ms / 1000, "Configured TTL mismatch")
+
+  verify.(
+    fresh["node_id"] == node["node_id"] and fresh["token"] == node["token"] and
+      fresh["ring_token"] == node["ring_token"],
+    "Renewal changed identity or credentials"
+  )
+
+  verify.(fresh["expires_in_seconds"] == ttl_ms / 1000, "TTL mismatch")
   fresh
 end
 
-renew_workers = fn workers ->
-  Enum.map(workers, fn {client, old} ->
-    fresh = renew.(client, old)
-    verify.(fresh["token"] != old["token"], "Expired worker kept its token")
-    {client, fresh}
-  end)
+rejoin = fn client, old ->
+  fresh = call.(client, "register_node", Map.take(old, ["role", "ring_token"]))
+
+  verify.(
+    fresh["node_id"] != old["node_id"] and fresh["ring_id"] == old["ring_id"],
+    "Rejoin reused an ID or changed rings"
+  )
+
+  verify.(fresh["expires_in_seconds"] == ttl_ms / 1000, "Rejoin TTL mismatch")
+  fresh
 end
 
-agents = [
-  {AgentTalk.SmokePM, "celeratax-pm", "pm"},
-  {AgentTalk.SmokeW1, "celeratax-w-1", "implementation"},
-  {AgentTalk.SmokeW2, "celeratax-w-2", "implementation"}
-]
-
-# Connect all clients before starting any short node lease.
-for {client, id, _role} <- agents do
+for name <- [AgentTalk.SmokePM, AgentTalk.SmokeW1, AgentTalk.SmokeW2] do
   {:ok, _} =
     Client.start_link(
-      name: client,
+      name: name,
       transport: {:streamable_http, base_url: url},
-      client_info: %{"name" => id, "version" => "0.1.0"},
+      client_info: %{"name" => to_string(name), "version" => "1"},
       capabilities: %{}
     )
 
-  :ok = Client.await_ready(client)
+  :ok = Client.await_ready(name)
 end
 
-[{pm_client, pm} | workers] =
-  Enum.map(agents, fn {client, id, role} ->
-    node = call.(client, "register_node", %{node_id: id, role: role})
-    verify.(node["expires_in_seconds"] == ttl_ms / 1000, "Configured TTL mismatch")
-    {client, node}
-  end)
+pm_client = AgentTalk.SmokePM
+pm = call.(pm_client, "register_node", %{role: "pm"})
+
+verify.(
+  pm["expires_in_seconds"] == 2 and is_binary(pm["onboarding_prompt_template"]),
+  "PM onboarding mismatch"
+)
+
+workers =
+  for client <- [AgentTalk.SmokeW1, AgentTalk.SmokeW2] do
+    {client, call.(client, "register_node", %{role: "worker", ring_token: pm["ring_token"]})}
+  end
 
 exchange = fn pm, workers ->
-  recipients = Enum.map(workers, fn {_client, node} -> node["node_id"] end)
+  ids = Enum.map(workers, fn {_client, worker} -> worker["node_id"] end) |> Enum.sort()
+  found = call.(pm_client, "list_nodes", auth.(pm, %{role: "worker"}))
+  verify.(Enum.map(found["nodes"], & &1["node_id"]) == ids, "Ring discovery mismatch")
 
   sent =
-    call.(pm_client, "communicate", auth.(pm, %{action: "send", to: recipients, message: "Task"}))
+    call.(
+      pm_client,
+      "communicate",
+      auth.(pm, %{action: "send", to_role: "worker", message: "Task"})
+    )
 
-  verify.(sent["delivered_to"] == recipients, "Fan-out mismatch")
+  verify.(sent["delivered_to"] == ids, "Ring broadcast mismatch")
 
   for {client, worker} <- workers do
     inbox = call.(client, "communicate", auth.(worker, %{action: "receive"}))
@@ -108,70 +123,93 @@ exchange = fn pm, workers ->
   end
 
   inbox = call.(pm_client, "communicate", auth.(pm, %{action: "receive"}))
-  senders = Enum.map(inbox["messages"], & &1["from"]) |> Enum.sort()
-  verify.(senders == ["celeratax-w-1", "celeratax-w-2"], "PM reply mismatch")
+  verify.(Enum.sort(Enum.map(inbox["messages"], & &1["from"])) == ids, "PM reply mismatch")
 end
 
 exchange.(pm, workers)
-renewed = renew.(pm_client, pm)
-verify.(renewed["token"] == pm["token"], "Active renewal changed the token")
-pm = renewed
-IO.puts("PASS: three MCP clients registered, exchanged messages and renewed; TTL matched")
+pm = renew.(pm_client, pm)
+
+IO.puts(
+  "PASS: PM created a ring; two independent clients joined, discovered and exchanged messages"
+)
 
 Process.sleep(ttl_ms + 200)
-verify.(call.(pm_client, "list_nodes", %{})["nodes"] == [], "Idle nodes did not expire")
+missing = "node is not registered or has expired; join again with role and ring_token"
+expect_error.(pm_client, "list_nodes", auth.(pm, %{}), missing)
+expect_error.(pm_client, "register_node", Map.take(pm, ["role", "node_id", "token"]), missing)
+old_pm = pm
+pm = rejoin.(pm_client, pm)
+expect_error.(pm_client, "communicate", auth.(old_pm, %{action: "receive"}), missing)
 
 expect_error.(
   pm_client,
   "communicate",
-  auth.(pm, %{action: "receive"}),
-  "node is not registered or has expired; call register_node"
+  auth.(%{pm | "token" => old_pm["token"]}, %{action: "receive"}),
+  "invalid node token"
 )
 
-old_pm = pm
-pm = renew.(pm_client, pm)
-verify.(pm["token"] != old_pm["token"], "Expired registration kept its token")
-expect_error.(pm_client, "communicate", auth.(old_pm, %{action: "receive"}), "invalid node token")
-
-expect_error.(
-  pm_client,
-  "register_node",
-  Map.take(old_pm, ["node_id", "role", "token"]),
-  "node_id is already registered; its token is required to renew it"
-)
-
-workers = renew_workers.(workers)
+workers = Enum.map(workers, fn {client, old} -> {client, rejoin.(client, old)} end)
 
 IO.puts(
-  "PASS: open MCP sessions did not prevent expiry; replacement tokens rejected stale credentials"
+  "PASS: idle expiry required fresh IDs; the invitation retained ring membership; stale credentials failed"
 )
 
 call.(
   pm_client,
   "communicate",
-  auth.(pm, %{action: "send", to: ["celeratax-w-1", "celeratax-w-2"], message: "Uncollected"})
+  auth.(pm, %{action: "send", to_role: "worker", message: "Uncollected"})
 )
 
 Process.sleep(div(ttl_ms, 2))
 pm = renew.(pm_client, pm)
 Process.sleep(div(ttl_ms, 2) + 200)
-nodes = call.(pm_client, "list_nodes", %{})["nodes"]
-verify.(Enum.map(nodes, & &1["node_id"]) == [pm["node_id"]], "Idle worker expiry mismatch")
+found = call.(pm_client, "list_nodes", auth.(pm, %{}))
+verify.(Enum.map(found["nodes"], & &1["node_id"]) == [pm["node_id"]], "Worker expiry mismatch")
+expired_worker = workers |> hd() |> elem(1)
 
 expect_error.(
   pm_client,
   "communicate",
-  auth.(pm, %{action: "send", to: ["celeratax-w-1"], message: "Not delivered"}),
-  "unknown or expired recipients: celeratax-w-1"
+  auth.(pm, %{action: "send", to: [expired_worker["node_id"]], message: "Not delivered"}),
+  "unknown or expired recipients"
 )
 
-# Keep each complete successful registration response as the new credential source.
-workers = renew_workers.(workers)
+workers = Enum.map(workers, fn {client, old} -> {client, rejoin.(client, old)} end)
 
 for {client, worker} <- workers do
-  inbox = call.(client, "communicate", auth.(worker, %{action: "receive"}))
-  verify.(inbox["messages"] == [], "Expired worker retained its old inbox")
+  verify.(
+    call.(client, "communicate", auth.(worker, %{action: "receive"}))["messages"] == [],
+    "Expired inbox survived"
+  )
 end
 
 exchange.(pm, workers)
-IO.puts("PASS: expiry discarded queued messages; re-registration restored delivery")
+IO.puts("PASS: expiry discarded queued messages; rejoining restored PM-to-workers delivery")
+
+other_pm = call.(pm_client, "register_node", %{role: "pm"})
+
+outsider =
+  call.(AgentTalk.SmokeW2, "register_node", %{role: "worker", ring_token: other_pm["ring_token"]})
+
+expect_error.(
+  pm_client,
+  "communicate",
+  auth.(pm, %{action: "send", to: [outsider["node_id"]], message: "Cross-ring"}),
+  "unknown or expired recipients"
+)
+
+sent =
+  call.(
+    pm_client,
+    "communicate",
+    auth.(pm, %{action: "send", to_role: "all", message: "Ring only"})
+  )
+
+verify.(length(sent["delivered_to"]) == 2, "Broadcast crossed ring boundary")
+
+verify.(
+  call.(AgentTalk.SmokeW2, "communicate", auth.(outsider, %{action: "receive"}))["messages"] == [],
+  "Other ring received a broadcast"
+)
+
+IO.puts("PASS: direct messages and broadcasts cannot cross ring boundaries; no tokens printed")

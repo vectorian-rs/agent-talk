@@ -11,129 +11,173 @@ defmodule AgentTalk.HubTest do
         {Hub, name: nil, ttl_ms: 1000, max_inbox: 2, clock: fn -> Agent.get(clock, & &1) end}
       )
 
-    %{hub: hub, clock: clock}
+    %{hub: hub, clock: clock, pm: register(hub, %{role: "pm"})}
   end
 
-  test "registration, discovery and renewal preserve a private inbox", %{hub: hub} do
-    pm = register(hub, "pm", "pm")
-    worker = register(hub, "backend")
-    assert {:ok, _} = send_message(hub, pm, %{to: ["backend"], message: "Build the API"})
-
-    assert {:ok, %{nodes: [node]}} = Hub.list_nodes("implementation", hub)
-    assert node.node_id == "backend"
-    assert node.pending_messages == 1
-    refute Map.has_key?(node, :token)
-
-    assert {:error, _} = Hub.register(%{node_id: "backend", role: "implementation"}, hub)
-
-    assert {:ok, renewed} =
-             Hub.register(%{node_id: "backend", role: "implementation", token: worker.token}, hub)
-
-    assert renewed.token == worker.token
-    assert {:ok, %{messages: [%{message: "Build the API"}]}} = receive_messages(hub, worker)
-    assert {:ok, %{messages: []}} = receive_messages(hub, worker)
+  test "a PM creates a ring and receives credentials and a reusable onboarding template", %{
+    pm: pm
+  } do
+    assert pm.role == "pm"
+    assert is_binary(pm.node_id)
+    assert is_binary(pm.ring_id)
+    assert pm.expires_in_seconds == 1
+    assert pm.onboarding_prompt_template =~ "<ROLE>"
+    assert pm.onboarding_prompt_template =~ "<RING_TOKEN>"
+    assert pm.instructions =~ "Save this complete response"
+    separate_tokens = pm.token != pm.ring_token
+    assert separate_tokens, "node credentials and ring invitations must be distinct"
+    template_is_safe = not String.contains?(pm.onboarding_prompt_template, pm.token)
+    assert template_is_safe, "onboarding must not disclose the PM's private node token"
   end
 
-  test "a PM broadcasts to N workers and workers reply privately", %{hub: hub} do
-    pm = register(hub, "pm", "pm")
-    backend = register(hub, "backend")
-    frontend = register(hub, "frontend")
+  test "agents join with arbitrary roles and a ring invitation", %{hub: hub, pm: pm} do
+    worker = join(hub, pm)
+    reviewer = join(hub, pm, "reviewer")
+    assert worker.role == "worker"
+    assert reviewer.role == "reviewer"
+    assert worker.ring_id == pm.ring_id
+    assert reviewer.ring_id == pm.ring_id
+    assert length(Enum.uniq([pm.node_id, worker.node_id, reviewer.node_id])) == 3
+    same_invitation = worker.ring_token == pm.ring_token
+    assert same_invitation, "saveable registration responses must retain the ring invitation"
+  end
 
-    assert {:ok, %{delivered_to: ["backend", "frontend"], message_id: id}} =
-             send_message(hub, pm, %{to_role: "implementation", message: "Start sprint"})
+  test "a joining agent needs a valid invitation and cannot choose its own ID", %{
+    hub: hub,
+    pm: pm
+  } do
+    assert {:error, _} = Hub.register(%{role: "worker"}, hub)
 
-    for worker <- [backend, frontend] do
-      assert {:ok, %{messages: [%{id: ^id, from: "pm", message: "Start sprint"}]}} =
-               receive_messages(hub, worker)
+    assert {:error, "invalid ring token"} =
+             Hub.register(%{role: "worker", ring_token: "invalid"}, hub)
+
+    assert {:error, _} =
+             Hub.register(%{role: "worker", ring_token: pm.ring_token, node_id: "chosen-id"}, hub)
+
+    assert {:error, _} = Hub.register(%{role: ""}, hub)
+    assert {:error, _} = Hub.register(%{role: "all"}, hub)
+    assert {:ok, %{nodes: [_]}} = Hub.snapshot(hub)
+  end
+
+  test "authenticated discovery is restricted to the caller's ring", %{hub: hub, pm: pm} do
+    worker = join(hub, pm)
+    other_pm = register(hub, %{role: "pm"})
+    join(hub, other_pm)
+    assert {:ok, %{ring_id: ring_id, nodes: nodes}} = Hub.list_nodes(auth(pm), hub)
+    assert ring_id == pm.ring_id
+    assert Enum.map(nodes, & &1.node_id) |> Enum.sort() == Enum.sort([pm.node_id, worker.node_id])
+    assert Enum.all?(nodes, &(not Map.has_key?(&1, :token) and not Map.has_key?(&1, :ring_token)))
+    assert {:ok, %{nodes: [found]}} = Hub.list_nodes(auth(pm, %{role: "worker"}), hub)
+    assert found.node_id == worker.node_id
+
+    assert {:error, "invalid node token"} =
+             Hub.list_nodes(%{node_id: pm.node_id, token: worker.token}, hub)
+  end
+
+  test "active renewal preserves ID, tokens, ring and queued messages", %{hub: hub, pm: pm} do
+    worker = join(hub, pm)
+    assert {:ok, _} = send_message(hub, pm, %{to: [worker.node_id], message: "Task"})
+    renewed = register(hub, Map.take(worker, [:role, :node_id, :token]))
+    same_credentials = renewed.token == worker.token and renewed.ring_token == worker.ring_token
+    assert same_credentials, "renewal must preserve both credentials"
+    assert renewed.node_id == worker.node_id
+    assert renewed.ring_id == worker.ring_id
+    assert {:ok, %{messages: [%{message: "Task"}]}} = receive_messages(hub, renewed)
+    assert {:error, "renewal cannot change role"} = Hub.register(%{worker | role: "pm"}, hub)
+
+    assert {:error, "ring_token does not match this node's ring"} =
+             Hub.register(%{worker | ring_token: "wrong-ring"}, hub)
+  end
+
+  test "ring invitations never authorize another node's messages or discovery", %{
+    hub: hub,
+    pm: pm
+  } do
+    worker = join(hub, pm)
+
+    for token <- [pm.ring_token, pm.token] do
+      args = %{node_id: worker.node_id, token: token}
+      assert {:error, "invalid node token"} = Hub.list_nodes(args, hub)
+
+      assert {:error, "invalid node token"} =
+               Hub.communicate(Map.put(args, :action, "receive"), hub)
+    end
+  end
+
+  test "a PM broadcasts to its workers and receives their private replies", %{hub: hub, pm: pm} do
+    workers = [join(hub, pm), join(hub, pm)]
+
+    assert {:ok, %{delivered_to: recipients, message_id: id}} =
+             send_message(hub, pm, %{to_role: "worker", message: "Start"})
+
+    assert recipients == Enum.sort(Enum.map(workers, & &1.node_id))
+
+    for worker <- workers do
+      assert {:ok, %{messages: [%{id: ^id, from: sender}]}} = receive_messages(hub, worker)
+      assert sender == pm.node_id
+      assert {:ok, _} = send_message(hub, worker, %{to: [pm.node_id], message: "Ready"})
     end
 
-    assert {:ok, %{messages: []}} = receive_messages(hub, pm)
-    assert {:ok, _} = send_message(hub, backend, %{to: ["pm"], message: "API ready"})
-
-    assert {:ok, %{messages: [%{from: "backend", message: "API ready"}]}} =
-             receive_messages(hub, pm)
-
-    assert {:ok, %{messages: []}} = receive_messages(hub, frontend)
+    assert {:ok, %{messages: replies}} = receive_messages(hub, pm)
+    assert Enum.map(replies, & &1.from) |> Enum.sort() == recipients
   end
 
-  test "explicit fan-out deduplicates recipients and preserves FIFO order", %{hub: hub} do
-    pm = register(hub, "pm", "pm")
-    worker = register(hub, "worker")
+  test "direct sends and broadcasts cannot cross ring boundaries", %{hub: hub, pm: pm} do
+    worker = join(hub, pm)
+    other_pm = register(hub, %{role: "pm"})
+    outsider = join(hub, other_pm)
 
-    assert {:ok, %{delivered_to: ["worker"]}} =
-             send_message(hub, pm, %{to: ["worker", "worker"], message: "First"})
+    assert {:error, _} =
+             send_message(hub, pm, %{to: [worker.node_id, outsider.node_id], message: "Mixed"})
 
-    assert {:ok, _} = send_message(hub, pm, %{to: ["worker"], message: "Second"})
+    assert {:ok, %{messages: []}} = receive_messages(hub, worker)
+    assert {:ok, %{messages: []}} = receive_messages(hub, outsider)
+
+    assert {:ok, %{delivered_to: [recipient]}} =
+             send_message(hub, pm, %{to_role: "all", message: "Local"})
+
+    assert recipient == worker.node_id
+    assert {:ok, %{messages: []}} = receive_messages(hub, other_pm)
+    assert {:ok, %{messages: []}} = receive_messages(hub, outsider)
+    assert {:ok, %{messages: []}} = receive_messages(hub, pm)
+  end
+
+  test "explicit fan-out deduplicates recipients and preserves FIFO order", %{hub: hub, pm: pm} do
+    worker = join(hub, pm)
+
+    assert {:ok, %{delivered_to: [recipient]}} =
+             send_message(hub, pm, %{to: [worker.node_id, worker.node_id], message: "First"})
+
+    assert recipient == worker.node_id
+    assert {:ok, _} = send_message(hub, pm, %{to: [worker.node_id], message: "Second"})
     assert {:ok, %{messages: messages}} = receive_messages(hub, worker)
     assert Enum.map(messages, & &1.message) == ["First", "Second"]
   end
 
-  test "failed fan-out never partially delivers", %{hub: hub} do
-    pm = register(hub, "pm", "pm")
-    worker = register(hub, "worker")
+  test "unknown recipients and inbox capacity reject the whole broadcast", %{hub: hub, pm: pm} do
+    worker = join(hub, pm)
+    other = join(hub, pm)
 
-    assert {:error, _} = send_message(hub, pm, %{to: ["worker", "missing"], message: "Task"})
+    assert {:error, _} =
+             send_message(hub, pm, %{to: [worker.node_id, "missing"], message: "Task"})
+
     assert {:ok, %{messages: []}} = receive_messages(hub, worker)
-  end
-
-  test "inbox capacity rejects the whole broadcast", %{hub: hub} do
-    pm = register(hub, "pm", "pm")
-    worker = register(hub, "worker")
-    other = register(hub, "other")
-
-    for text <- ["One", "Two"] do
-      assert {:ok, _} = send_message(hub, pm, %{to: ["worker"], message: text})
-    end
-
-    assert {:error, _} = send_message(hub, pm, %{to_role: "implementation", message: "Three"})
+    for text <- ["One", "Two"], do: send_message(hub, pm, %{to: [worker.node_id], message: text})
+    assert {:error, _} = send_message(hub, pm, %{to_role: "worker", message: "Three"})
     assert {:ok, %{messages: []}} = receive_messages(hub, other)
     assert {:ok, %{messages: [_, _]}} = receive_messages(hub, worker)
   end
 
-  test "tokens prevent impersonation and reading another inbox", %{hub: hub} do
-    pm = register(hub, "pm", "pm")
-    worker = register(hub, "worker")
-    assert {:ok, _} = send_message(hub, pm, %{to: ["worker"], message: "Private"})
-
-    assert {:error, "invalid node token"} =
-             Hub.communicate(%{action: "receive", node_id: "worker", token: pm.token}, hub)
-
-    assert {:error, "invalid node token"} =
-             send_message(hub, %{pm | token: worker.token}, %{to: ["worker"], message: "Fake"})
-
-    assert {:ok, %{messages: [%{message: "Private"}]}} = receive_messages(hub, worker)
-  end
-
-  test "only active nodes are listed and authenticated activity renews the lease", %{
-    hub: hub,
-    clock: clock
-  } do
-    pm = register(hub, "pm", "pm")
-    worker = register(hub, "worker")
-    Agent.update(clock, fn _ -> 600 end)
-    assert {:ok, _} = receive_messages(hub, worker)
-    Agent.update(clock, fn _ -> 1000 end)
-
-    assert {:ok, %{nodes: [%{node_id: "worker"}]}} = Hub.list_nodes(nil, hub)
-    assert {:error, _} = receive_messages(hub, pm)
-
-    Agent.update(clock, fn _ -> 1600 end)
-    assert {:ok, %{nodes: []}} = Hub.list_nodes(nil, hub)
-    assert {:error, _} = receive_messages(hub, worker)
-    assert register(hub, "worker").token != worker.token
-  end
-
-  test "invalid targeting and empty messages do not deliver", %{hub: hub} do
-    pm = register(hub, "pm", "pm")
-    worker = register(hub, "worker")
+  test "invalid targeting and messages do not deliver", %{hub: hub, pm: pm} do
+    worker = join(hub, pm)
 
     for fields <- [
           %{to: [], message: "Task"},
-          %{to: ["worker"], to_role: "implementation", message: "Task"},
+          %{to: [worker.node_id], to_role: "worker", message: "Task"},
           %{message: "Task"},
-          %{to: ["worker"], message: "  "},
-          %{to: ["worker"]},
-          %{to: ["worker"], message: String.duplicate("a", 65_537)}
+          %{to: [worker.node_id], message: "  "},
+          %{to: [worker.node_id]},
+          %{to: [worker.node_id], message: String.duplicate("a", 65_537)}
         ] do
       assert {:error, _} = send_message(hub, pm, fields)
     end
@@ -141,64 +185,60 @@ defmodule AgentTalk.HubTest do
     assert {:ok, %{messages: []}} = receive_messages(hub, worker)
   end
 
-  test "broadcast to all excludes the sender", %{hub: hub} do
-    pm = register(hub, "pm", "pm")
-    register(hub, "worker")
-
-    assert {:ok, %{delivered_to: ["worker"]}} =
-             send_message(hub, pm, %{to_role: "all", message: "Hi"})
-
-    assert {:ok, %{messages: []}} = receive_messages(hub, pm)
-  end
-
-  test "operator snapshots observe routes without consuming inboxes or exposing tokens", %{
-    hub: hub
+  test "public snapshots retain ring routes without exposing credentials or draining inboxes", %{
+    hub: hub,
+    pm: pm
   } do
-    pm = register(hub, "pm", "pm")
-    worker = register(hub, "worker")
-    assert {:ok, %{message_id: id}} = send_message(hub, pm, %{to: ["worker"], message: "Task"})
+    worker = join(hub, pm)
 
-    assert {:ok, %{nodes: nodes, messages: [event]}} = Hub.snapshot(hub)
-    assert Enum.all?(nodes, &(not Map.has_key?(&1, :token)))
+    assert {:ok, %{message_id: id}} =
+             send_message(hub, pm, %{to: [worker.node_id], message: "Task"})
+
+    assert {:ok, %{messages: [event]} = snapshot} = Hub.snapshot(hub)
     assert event.id == id
-    assert event.from == "pm"
-    assert event.to == ["worker"]
+    assert event.ring_id == pm.ring_id
+    assert event.to == [worker.node_id]
     assert event.received_by == []
-    refute Map.has_key?(event, :token)
+    public_json = Jason.encode!(snapshot)
+
+    credentials_leaked =
+      Enum.any?([pm.token, worker.token, pm.ring_token], &String.contains?(public_json, &1))
+
+    refute credentials_leaked, "operator snapshots must not expose invitation or node tokens"
     assert {:ok, %{messages: [%{id: ^id}]}} = receive_messages(hub, worker)
-    assert {:ok, %{messages: [%{received_by: ["worker"]}]}} = Hub.snapshot(hub)
   end
 
-  test "operator history retains exactly the newest 50 messages after inboxes are drained", %{
-    hub: hub
+  test "operator history retains the newest 50 sends after inboxes are drained", %{
+    hub: hub,
+    pm: pm
   } do
-    pm = register(hub, "pm", "pm")
-    worker = register(hub, "worker")
+    worker = join(hub, pm)
 
     for number <- 1..55 do
-      assert {:ok, _} = send_message(hub, pm, %{to: ["worker"], message: "Message #{number}"})
+      assert {:ok, _} =
+               send_message(hub, pm, %{to: [worker.node_id], message: "Message #{number}"})
+
       assert {:ok, _} = receive_messages(hub, worker)
     end
 
-    assert {:ok, %{messages: history}} = Hub.snapshot(hub)
+    assert {:ok, %{messages: history, history_limit: 50}} = Hub.snapshot(hub)
     assert length(history) == 50
     assert hd(history).message == "Message 55"
     assert List.last(history).message == "Message 6"
-    assert {:ok, %{messages: []}} = receive_messages(hub, worker)
     assert {:error, _} = send_message(hub, pm, %{to: ["missing"], message: "Failed"})
     assert {:ok, %{messages: ^history}} = Hub.snapshot(hub)
   end
 
-  test "operator delivery status tracks recipients independently", %{hub: hub} do
-    pm = register(hub, "pm", "pm")
-    backend = register(hub, "backend")
-    frontend = register(hub, "frontend")
-    assert {:ok, _} = send_message(hub, pm, %{to_role: "implementation", message: "Start"})
-    receive_messages(hub, backend)
-    assert {:ok, %{messages: [%{received_by: ["backend"]}]}} = Hub.snapshot(hub)
-    receive_messages(hub, frontend)
+  test "collection status tracks each recipient separately", %{hub: hub, pm: pm} do
+    first = join(hub, pm)
+    second = join(hub, pm)
+    assert {:ok, _} = send_message(hub, pm, %{to_role: "worker", message: "Start"})
+    receive_messages(hub, first)
+    assert {:ok, %{messages: [%{received_by: [collected]}]}} = Hub.snapshot(hub)
+    assert collected == first.node_id
+    receive_messages(hub, second)
     assert {:ok, %{messages: [%{received_by: recipients}]}} = Hub.snapshot(hub)
-    assert Enum.sort(recipients) == ["backend", "frontend"]
+    assert Enum.sort(recipients) == Enum.sort([first.node_id, second.node_id])
   end
 
   test "configured history limit trims the log without truncating the inbox" do
@@ -207,13 +247,11 @@ defmodule AgentTalk.HubTest do
         Supervisor.child_spec({Hub, name: nil, history_limit: 2}, id: :limited_history)
       )
 
-    pm = register(hub, "limited-pm", "pm")
-    worker = register(hub, "limited-worker")
+    pm = register(hub, %{role: "pm"})
+    worker = join(hub, pm)
 
-    for number <- 1..4 do
-      assert {:ok, _} =
-               send_message(hub, pm, %{to: [worker.node_id], message: "Message #{number}"})
-    end
+    for number <- 1..4,
+        do: send_message(hub, pm, %{to: [worker.node_id], message: "Message #{number}"})
 
     assert {:ok, %{messages: history, history_limit: 2}} = Hub.snapshot(hub)
     assert Enum.map(history, & &1.message) == ["Message 4", "Message 3"]
@@ -221,9 +259,38 @@ defmodule AgentTalk.HubTest do
     assert Enum.map(inbox, & &1.message) == Enum.map(1..4, &"Message #{&1}")
   end
 
-  test "presence sweeps publish expiry without an incoming tool call", %{clock: clock} do
-    pubsub = start_supervised!({Phoenix.PubSub, name: AgentTalk.HubTestPubSub})
-    assert is_pid(pubsub)
+  test "IDs are never reused after expiry or hub replacement within the server VM", %{
+    hub: hub,
+    clock: clock,
+    pm: pm
+  } do
+    workers = for _ <- 1..20, do: join(hub, pm)
+    Agent.update(clock, fn _ -> 1000 end)
+    new_pm = register(hub, %{role: "pm", ring_token: pm.ring_token})
+    more_workers = for _ <- 1..20, do: join(hub, new_pm)
+    replacement = start_supervised!(Supervisor.child_spec({Hub, name: nil}, id: :replacement))
+
+    assert {:error, "invalid ring token"} =
+             Hub.register(%{role: "worker", ring_token: pm.ring_token}, replacement)
+
+    replaced_pm = register(replacement, %{role: "pm"})
+    ids = Enum.map([pm, new_pm, replaced_pm | workers ++ more_workers], & &1.node_id)
+    assert length(Enum.uniq(ids)) == length(ids)
+    assert new_pm.ring_id == pm.ring_id
+  end
+
+  test "concurrent role-only joins receive distinct IDs in the same ring", %{hub: hub, pm: pm} do
+    results =
+      1..40
+      |> Enum.map(fn _ -> Task.async(fn -> join(hub, pm) end) end)
+      |> Enum.map(&Task.await/1)
+
+    assert length(Enum.uniq_by(results, & &1.node_id)) == 40
+    assert Enum.all?(results, &(&1.ring_id == pm.ring_id))
+  end
+
+  test "presence sweeps publish expiry without a tool call", %{clock: clock} do
+    start_supervised!({Phoenix.PubSub, name: AgentTalk.HubTestPubSub})
     Phoenix.PubSub.subscribe(AgentTalk.HubTestPubSub, Hub.topic())
 
     hub =
@@ -234,11 +301,11 @@ defmodule AgentTalk.HubTest do
            ttl_ms: 1000,
            clock: fn -> Agent.get(clock, & &1) end,
            pubsub: AgentTalk.HubTestPubSub},
-          id: :observed_hub
+          id: :observed
         )
       )
 
-    register(hub, "worker")
+    register(hub, %{role: "pm"})
     assert_receive :hub_updated
     Agent.update(clock, fn _ -> 1000 end)
     send(hub, :sweep)
@@ -246,17 +313,19 @@ defmodule AgentTalk.HubTest do
     assert {:ok, %{nodes: []}} = Hub.snapshot(hub)
   end
 
-  defp register(hub, id, role \\ "implementation") do
-    {:ok, node} = Hub.register(%{node_id: id, role: role}, hub)
+  defp register(hub, args) do
+    {:ok, node} = Hub.register(args, hub)
     node
   end
 
-  defp send_message(hub, node, fields) do
-    args = Map.merge(%{action: "send", node_id: node.node_id, token: node.token}, fields)
-    Hub.communicate(args, hub)
-  end
+  defp join(hub, pm, role \\ "worker"),
+    do: register(hub, %{role: role, ring_token: pm.ring_token})
 
-  defp receive_messages(hub, node) do
-    Hub.communicate(%{action: "receive", node_id: node.node_id, token: node.token}, hub)
-  end
+  defp auth(node, fields \\ %{}),
+    do: Map.merge(%{node_id: node.node_id, token: node.token}, fields)
+
+  defp send_message(hub, node, fields),
+    do: Hub.communicate(auth(node, Map.put(fields, :action, "send")), hub)
+
+  defp receive_messages(hub, node), do: Hub.communicate(auth(node, %{action: "receive"}), hub)
 end

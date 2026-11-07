@@ -1,88 +1,86 @@
-# Run with: mix run examples/demo.exs
-# To watch an already running server:
-# mix run --no-start examples/demo.exs --url http://127.0.0.1:4000
+# Isolated: mix run --no-start examples/demo.exs
+# Operator UI: mix run --no-start examples/demo.exs --url http://127.0.0.1:4000
 alias Anubis.Client
-
-{:ok, _} = Application.ensure_all_started(:anubis_mcp)
-Logger.configure(level: :info)
-{:ok, _} = Finch.start_link(name: Anubis.Finch)
 
 {options, _args} = OptionParser.parse!(System.argv(), strict: [url: :string, config: :string])
 external_url = options[:url]
-base_url = external_url || "http://127.0.0.1:#{Application.fetch_env!(:agent_talk, :port)}"
+Logger.configure(level: :warning)
 
-suffix =
-  if external_url,
-    do: "-demo-" <> Base.encode16(:crypto.strong_rand_bytes(3), case: :lower),
-    else: ""
+base_url =
+  if external_url do
+    {:ok, _} = Application.ensure_all_started(:anubis_mcp)
+    external_url
+  else
+    Application.put_env(:agent_talk, :http_enabled, false)
+    {:ok, _} = Application.ensure_all_started(:agent_talk)
 
-pause = fn -> if external_url, do: Process.sleep(700) end
+    {:ok, listener} =
+      Bandit.start_link(plug: AgentTalk.Router, ip: {127, 0, 0, 1}, port: 0, startup_log: false)
+
+    {:ok, {_ip, port}} = ThousandIsland.listener_info(listener)
+    "http://127.0.0.1:#{port}"
+  end
+
+{:ok, _} = Finch.start_link(name: Anubis.Finch)
 
 call = fn client, tool, args ->
-  {:ok, response} = Client.call_tool(client, tool, args)
-  if response.is_error, do: raise(inspect(response.result))
-  response.result["structuredContent"]
+  case Client.call_tool(client, tool, args) do
+    {:ok, %{is_error: false, result: result}} -> result["structuredContent"]
+    _ -> raise "#{tool} failed (response omitted to protect credentials)"
+  end
 end
 
-agents = [
-  {AgentTalk.DemoPM, "pm", "pm"},
-  {AgentTalk.DemoBackend, "backend", "implementation"},
-  {AgentTalk.DemoFrontend, "frontend", "implementation"}
-]
+auth = fn node, fields -> Map.merge(%{node_id: node["node_id"], token: node["token"]}, fields) end
+pause = fn -> if external_url, do: Process.sleep(700) end
 
-nodes =
-  Enum.map(agents, fn {client, id, role} ->
-    id = id <> suffix
+for name <- [AgentTalk.DemoPM, AgentTalk.DemoW1, AgentTalk.DemoW2] do
+  {:ok, _} =
+    Client.start_link(
+      name: name,
+      transport: {:streamable_http, base_url: base_url},
+      client_info: %{"name" => to_string(name), "version" => "1"},
+      capabilities: %{}
+    )
 
-    {:ok, _} =
-      Client.start_link(
-        name: client,
-        transport: {:streamable_http, base_url: base_url},
-        client_info: %{"name" => id, "version" => "0.1.0"},
-        capabilities: %{}
-      )
+  :ok = Client.await_ready(name)
+end
 
-    :ok = Client.await_ready(client)
-    node = call.(client, "register_node", %{node_id: id, role: role})
-    {client, %{node_id: id, token: node["token"]}}
-  end)
+# Keep complete responses in memory; never print node or invitation tokens.
+pm = call.(AgentTalk.DemoPM, "register_node", %{role: "pm"})
 
-[{pm, pm_auth} | workers] = nodes
-IO.inspect(call.(pm, "list_nodes", %{}), label: "Connected agents")
+workers =
+  for name <- [AgentTalk.DemoW1, AgentTalk.DemoW2] do
+    {name, call.(name, "register_node", %{role: "worker", ring_token: pm["ring_token"]})}
+  end
+
+IO.inspect(call.(AgentTalk.DemoPM, "list_nodes", auth.(pm, %{})), label: "Ring members")
 pause.()
-
-targets =
-  if external_url,
-    do: %{to: Enum.map(workers, fn {_client, auth} -> auth.node_id end)},
-    else: %{to_role: "implementation"}
 
 IO.inspect(
   call.(
-    pm,
+    AgentTalk.DemoPM,
     "communicate",
-    pm_auth
-    |> Map.merge(targets)
-    |> Map.merge(%{action: "send", message: "Implement your part of the feature."})
+    auth.(pm, %{action: "send", to_role: "worker", message: "Implement your part of the feature."})
   ),
-  label: "PM broadcasts"
+  label: "PM broadcasts within its ring"
 )
 
-for {client, auth} <- workers do
+for {name, worker} <- workers do
   pause.()
 
-  IO.inspect(call.(client, "communicate", Map.put(auth, :action, "receive")),
-    label: "#{auth.node_id} inbox"
+  IO.inspect(call.(name, "communicate", auth.(worker, %{action: "receive"})),
+    label: "#{worker["node_id"]} inbox"
   )
 
   call.(
-    client,
+    name,
     "communicate",
-    Map.merge(auth, %{action: "send", to: [pm_auth.node_id], message: "#{auth.node_id}: done"})
+    auth.(worker, %{action: "send", to: [pm["node_id"]], message: "#{worker["node_id"]}: done"})
   )
 end
 
 pause.()
 
-IO.inspect(call.(pm, "communicate", Map.put(pm_auth, :action, "receive")),
+IO.inspect(call.(AgentTalk.DemoPM, "communicate", auth.(pm, %{action: "receive"})),
   label: "PM receives replies"
 )

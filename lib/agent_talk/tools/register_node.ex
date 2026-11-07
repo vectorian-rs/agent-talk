@@ -1,23 +1,32 @@
 defmodule AgentTalk.Tools.RegisterNode do
   @moduledoc """
-  Register an agent or renew its lease with its current token, preserving its inbox.
-  After expiry, registration creates a new token and empty inbox. Save every
-  successful response before another authenticated call, replacing saved credentials.
+  A PM starts a ring with role=pm and receives its ring_token and onboarding template.
+  Other agents join with their role and that ring_token; the server assigns unique IDs.
+  Renew with role, node_id and your private token. After expiry, join again with role
+  and ring_token for a new identity. Save every successful response and follow its instructions.
   """
   use Anubis.Server.Component, type: :tool, name: "register_node"
 
   schema do
     field(:node_id, :string,
+      min_length: 1,
+      max_length: 64,
+      description: "Server-assigned ID, supplied only when renewing"
+    )
+
+    field(:role, :string,
       required: true,
       min_length: 1,
       max_length: 64,
-      description: "Unique agent name, e.g. pm, backend or frontend"
+      description: "Your role, e.g. pm, worker or reviewer. pm without ring_token creates a ring."
     )
 
-    field(:role, {:enum, ["pm", "implementation"]}, required: true)
+    field(:ring_token, :string,
+      description: "PM's ring invitation token, required for a new join"
+    )
 
     field(:token, :string,
-      description: "Token from the latest successful registration, for renewal"
+      description: "Your private node token for renewal; never use the shared ring_token here"
     )
   end
 

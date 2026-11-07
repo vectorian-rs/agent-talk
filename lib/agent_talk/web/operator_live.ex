@@ -54,7 +54,7 @@ defmodule AgentTalk.Web.OperatorLive do
 
   defp clock(iso8601), do: String.slice(iso8601, 11, 8)
   defp role_name("pm"), do: "PM"
-  defp role_name("implementation"), do: "Implementation"
+  defp role_name(role), do: String.capitalize(role)
 
   defp delivery(event) do
     case length(event.received_by) do
@@ -120,11 +120,11 @@ defmodule AgentTalk.Web.OperatorLive do
             <ul :if={@nodes != []} id="agent-list" class="agent-list">
               <li :for={node <- @nodes} id={"agent-#{node.node_id}"} class="agent-item">
                 <span class={["agent-avatar", node.role == "pm" && "avatar-pm"]} aria-hidden="true">
-                  {if node.role == "pm", do: "P", else: String.upcase(String.first(node.node_id))}
+                  {String.upcase(String.first(node.role))}
                 </span>
                 <div class="agent-details">
                   <p class="agent-name">{node.node_id}</p>
-                  <p class="agent-role">{role_name(node.role)}</p>
+                  <p class="agent-role">{role_name(node.role)} · {node.ring_id}</p>
                   <p class="agent-pending">{node.pending_messages} in inbox</p>
                 </div>
                 <span class="agent-online" aria-label="Registration active"></span>
@@ -132,7 +132,7 @@ defmodule AgentTalk.Web.OperatorLive do
             </ul>
             <div class="presence-note">
               <span class="small-label">Registration lease</span>
-              <p>Sending, receiving, or renewing registration extends the lease.</p>
+              <p>Discovery, messaging, and registration renew the caller's lease.</p>
             </div>
           </aside>
 
@@ -177,7 +177,7 @@ defmodule AgentTalk.Web.OperatorLive do
                 </div>
                 <p class="message-body">{event.message}</p>
                 <div class="message-footer">
-                  <span class="small-label message-kind">{if length(event.to) > 1, do: "Broadcast · #{length(event.to)} recipients", else: "Direct message"}</span>
+                  <span class="small-label message-kind">{event.ring_id} · {if length(event.to) > 1, do: "Broadcast · #{length(event.to)} recipients", else: "Direct message"}</span>
                   <span class={["delivery-status", event.received_by != [] && "delivery-collected"]} title="Collected means a recipient fetched the message from its inbox.">
                     <span aria-hidden="true">{if event.received_by == [], do: "○", else: "✓"}</span> {delivery(event)}
                   </span>

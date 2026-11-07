@@ -1,5 +1,5 @@
 defmodule AgentTalk.Hub do
-  @moduledoc "Serializes registration and fan-out into ephemeral, per-agent mailboxes."
+  @moduledoc "Serializes ring membership and fan-out into ephemeral, per-agent mailboxes."
   use GenServer
 
   def start_link(opts) do
@@ -7,7 +7,7 @@ defmodule AgentTalk.Hub do
   end
 
   def register(args, server \\ __MODULE__), do: GenServer.call(server, {:register, args})
-  def list_nodes(role \\ nil, server \\ __MODULE__), do: GenServer.call(server, {:list, role})
+  def list_nodes(args, server \\ __MODULE__), do: GenServer.call(server, {:list, args})
   def communicate(args, server \\ __MODULE__), do: GenServer.call(server, {:communicate, args})
   def snapshot(server \\ __MODULE__), do: GenServer.call(server, :snapshot)
 
@@ -20,6 +20,7 @@ defmodule AgentTalk.Hub do
     {:ok,
      %{
        nodes: %{},
+       rings: %{},
        messages: [],
        pubsub: Keyword.get(opts, :pubsub),
        ttl_ms:
@@ -62,50 +63,153 @@ defmodule AgentTalk.Hub do
   end
 
   defp dispatch({:register, args}, state, now) do
-    %{node_id: id, role: role} = args
-    existing = state.nodes[id]
+    role = Map.get(args, :role)
+    id = Map.get(args, :node_id)
+    token = Map.get(args, :token)
 
     cond do
-      not valid_id?(id) ->
-        {{:error, "node_id must be 1..64 letters, digits, underscores, dots or hyphens"}, state}
+      not valid_id?(role) ->
+        {{:error, "role must be 1..64 letters, digits, underscores, dots or hyphens"}, state}
 
-      role not in ["pm", "implementation"] ->
-        {{:error, "role must be pm or implementation"}, state}
+      role == "all" ->
+        {{:error, "role all is reserved for broadcasts"}, state}
 
-      existing != nil and Map.get(args, :token) != existing.token ->
-        {{:error, "node_id is already registered; its token is required to renew it"}, state}
+      id == nil and token == nil ->
+        join_ring(args, state, now)
+
+      id == nil or token == nil ->
+        {{:error, "renewal requires both node_id and token; a new join uses role and ring_token"},
+         state}
 
       true ->
-        node =
-          (existing || %{node_id: id, token: random_id(), inbox: :queue.new()})
-          |> Map.merge(%{role: role, seen_at: now, last_seen: timestamp()})
+        case state.nodes[id] do
+          nil ->
+            {{:error,
+              "node is not registered or has expired; join again with role and ring_token"},
+             state}
 
-        data =
-          Map.merge(public_node(node), %{
-            token: node.token,
-            expires_in_seconds: state.ttl_ms / 1000
-          })
+          node ->
+            cond do
+              token != node.token ->
+                {{:error, "invalid node token"}, state}
 
-        {{:ok, data}, put_in(state.nodes[id], node)}
+              role != node.role ->
+                {{:error, "renewal cannot change role"}, state}
+
+              Map.get(args, :ring_token) != nil and
+                  args.ring_token != state.rings[node.ring_id] ->
+                {{:error, "ring_token does not match this node's ring"}, state}
+
+              true ->
+                node = %{node | seen_at: now, last_seen: timestamp()}
+                updated = put_in(state.nodes[id], node)
+                {{:ok, registration(node, updated)}, updated}
+            end
+        end
     end
   end
 
-  defp dispatch({:list, role}, state, _now) do
-    nodes = Enum.filter(public_nodes(state.nodes), &(is_nil(role) or &1.role == role))
-    {{:ok, %{nodes: nodes}}, state}
+  defp dispatch({:list, args}, state, now) do
+    with {:ok, caller, updated} <- authenticate(args, state, now) do
+      role = Map.get(args, :role)
+
+      if role == nil or valid_id?(role) do
+        nodes =
+          public_nodes(updated.nodes)
+          |> Enum.filter(&(&1.ring_id == caller.ring_id and (role == nil or &1.role == role)))
+
+        {{:ok, %{ring_id: caller.ring_id, nodes: nodes}}, updated}
+      else
+        {{:error, "invalid role filter"}, updated}
+      end
+    else
+      {:error, _} = error -> {error, state}
+    end
   end
 
   defp dispatch({:communicate, args}, state, now) do
-    case state.nodes[args.node_id] do
+    case authenticate(args, state, now) do
+      {:ok, node, updated} -> communicate(args, updated, node)
+      {:error, _} = error -> {error, state}
+    end
+  end
+
+  defp join_ring(args, state, now) do
+    case {args.role, Map.get(args, :ring_token)} do
+      {"pm", nil} ->
+        ring_id = unique_id("ring")
+        state = put_in(state.rings[ring_id], new_token())
+        add_node(args.role, ring_id, state, now)
+
+      {_role, nil} ->
+        {{:error, "ring_token is required; ask the PM for an onboarding prompt"}, state}
+
+      {role, ring_token} ->
+        case Enum.find(state.rings, fn {_id, token} -> token == ring_token end) do
+          {ring_id, _token} -> add_node(role, ring_id, state, now)
+          nil -> {{:error, "invalid ring token"}, state}
+        end
+    end
+  end
+
+  defp add_node(role, ring_id, state, now) do
+    node = %{
+      node_id: unique_id("node"),
+      role: role,
+      ring_id: ring_id,
+      token: new_token(),
+      inbox: :queue.new(),
+      seen_at: now,
+      last_seen: timestamp()
+    }
+
+    updated = put_in(state.nodes[node.node_id], node)
+    {{:ok, registration(node, updated)}, updated}
+  end
+
+  defp registration(node, state) do
+    data =
+      Map.merge(public_node(node), %{
+        token: node.token,
+        ring_token: state.rings[node.ring_id],
+        expires_in_seconds: state.ttl_ms / 1000,
+        instructions: """
+        Save this complete response privately before another call; never publish either token.
+        Renew with role, node_id and token. Use list_nodes with node_id and token to discover
+        members of this ring; optionally filter by role. Use communicate to send to those IDs
+        or to_role, or receive your inbox between tasks. Wait for the operator to resume idle
+        agents; do not start endless polling or other agents. After expiry, join again with
+        role and ring_token, save the new identity, and reconcile work with the project record.
+        Ring tokens invite members; only your private node token authenticates your calls.
+        """
+      })
+
+    if node.role == "pm" do
+      Map.put(data, :onboarding_prompt_template, """
+      Follow this project's instructions for <ROLE>. Join AgentTalk ring #{node.ring_id}.
+      Resume this session's saved credentials only if role and ring match; otherwise call
+      register_node with role=<ROLE> and ring_token=<RING_TOKEN>. Save the complete response
+      privately and follow its instructions. Report ready to PM #{node.node_id} in this ring.
+      """)
+    else
+      data
+    end
+  end
+
+  defp authenticate(args, state, now) do
+    case state.nodes[Map.get(args, :node_id)] do
       nil ->
-        {{:error, "node is not registered or has expired; call register_node"}, state}
+        {:error, "node is not registered or has expired; join again with role and ring_token"}
 
-      %{token: token} = node when token == args.token ->
-        state = put_in(state.nodes[node.node_id], %{node | seen_at: now, last_seen: timestamp()})
-        communicate(args, state, node)
+      node ->
+        if Map.get(args, :token) == node.token do
+          updated =
+            put_in(state.nodes[node.node_id], %{node | seen_at: now, last_seen: timestamp()})
 
-      _node ->
-        {{:error, "invalid node token"}, state}
+          {:ok, node, updated}
+        else
+          {:error, "invalid node token"}
+        end
     end
   end
 
@@ -133,11 +237,12 @@ defmodule AgentTalk.Hub do
 
   defp communicate(%{action: "send"} = args, state, node) do
     with :ok <- validate_message(Map.get(args, :message)),
-         {:ok, recipients} <- recipients(args, state.nodes, node.node_id),
+         {:ok, recipients} <- recipients(args, ring_nodes(state, node.ring_id), node.node_id),
          :ok <- check_capacity(recipients, state) do
       message = %{
-        id: random_id(),
+        id: unique_id("message"),
         from: node.node_id,
+        ring_id: node.ring_id,
         message: args.message,
         sent_at: timestamp()
       }
@@ -173,7 +278,7 @@ defmodule AgentTalk.Hub do
           do: {:ok, ids},
           else: {:error, "unknown or expired recipients: #{Enum.join(missing, ", ")}"}
 
-      to == nil and role in ["pm", "implementation", "all"] ->
+      to == nil and valid_id?(role) ->
         ids =
           nodes
           |> Map.values()
@@ -184,7 +289,7 @@ defmodule AgentTalk.Hub do
         if ids == [], do: {:error, "no matching recipients"}, else: {:ok, ids}
 
       true ->
-        {:error, "send requires a nonempty to list or to_role (pm, implementation or all)"}
+        {:error, "send requires a nonempty to list or to_role (a role or all)"}
     end
   end
 
@@ -205,16 +310,22 @@ defmodule AgentTalk.Hub do
   defp validate_message(_), do: {:error, "message is required when sending"}
 
   defp valid_id?(id), do: is_binary(id) and Regex.match?(~r/\A[a-zA-Z0-9_.-]{1,64}\z/, id)
-  defp random_id, do: Base.url_encode64(:crypto.strong_rand_bytes(24), padding: false)
+  defp unique_id(prefix), do: "#{prefix}-#{System.unique_integer([:positive, :monotonic])}"
+
+  defp new_token do
+    :crypto.hash(:sha256, :crypto.strong_rand_bytes(32)) |> Base.url_encode64(padding: false)
+  end
+
   defp timestamp, do: DateTime.utc_now() |> DateTime.to_iso8601()
+
+  defp ring_nodes(state, ring_id),
+    do: Map.filter(state.nodes, fn {_id, node} -> node.ring_id == ring_id end)
 
   defp public_nodes(nodes) do
     nodes |> Map.values() |> Enum.sort_by(& &1.node_id) |> Enum.map(&public_node/1)
   end
 
-  defp history_limit(state),
-    do:
-      Map.get(state, :history_limit, Application.get_env(:agent_talk, :message_history_limit, 50))
+  defp history_limit(state), do: state.history_limit
 
   defp expire_nodes(state, now) do
     nodes = Map.reject(state.nodes, fn {_id, node} -> now - node.seen_at >= state.ttl_ms end)
@@ -232,6 +343,7 @@ defmodule AgentTalk.Hub do
     %{
       node_id: node.node_id,
       role: node.role,
+      ring_id: node.ring_id,
       last_seen: node.last_seen,
       pending_messages: :queue.len(node.inbox)
     }

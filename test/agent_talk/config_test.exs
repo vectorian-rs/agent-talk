@@ -16,7 +16,7 @@ defmodule AgentTalk.ConfigTest do
 
   test "hub defaults use the loaded application settings" do
     hub = start_supervised!({Hub, name: nil})
-    {:ok, node} = Hub.register(%{node_id: "default-lease", role: "pm"}, hub)
+    {:ok, node} = Hub.register(%{role: "pm"}, hub)
     assert node.expires_in_seconds == 86_400
     assert {:ok, %{history_limit: 50}} = Hub.snapshot(hub)
   end

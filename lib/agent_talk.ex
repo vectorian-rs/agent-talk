@@ -1,5 +1,5 @@
 defmodule AgentTalk do
-  @moduledoc "A small, shared MCP message hub for PM and implementation agents."
+  @moduledoc "A small MCP message hub for a PM and its invited agents."
 
   alias Anubis.Server.Response
 
