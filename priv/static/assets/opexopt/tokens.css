@@ -1,0 +1,110 @@
+/* Design tokens. Each color is set once for both themes with light-dark():
+   the page follows the browser's preference unless the theme button sets
+   data-theme for this tab. Components use only these variables, so dark mode
+   needs no rules of its own. The paper colors are repeated as theme-color
+   in Base.astro and in site.webmanifest. */
+
+/* Cascade order for every stylesheet, repeated at the top of each file so
+   it holds whichever file the bundle loads first: tokens, then element and
+   shared base styles, then page layout, then components. */
+@layer tokens, base, layout, components;
+
+/* Breakpoints. Media queries cannot read custom properties, so the scale is
+   written out where it is used; keep to these three, in em so they follow
+   the reader's zoom:
+     (width >= 22.5em) 360px  the header only: below it, folded foldables
+     (width >= 30em)  480px   phones turned sideways, small tablets
+     (width >= 48em)  768px   tablets: two-column layouts, the dialog
+     (width >= 64em) 1024px   laptops: the full header, the workflow diagram
+   Components inside variable-width containers (the driver tree) use
+   container queries instead. */
+
+@layer tokens {
+  :root {
+    color-scheme: light dark;
+    --paper: light-dark(#fbfbfa, #111317);
+    --surface: light-dark(#fff, #181b20);
+    /* The pale yellow highlight: a soft sand pastel on dark, with dark text. */
+    --assumption-bg: light-dark(#fefce8, #dfd6ae);
+    --assumption-line: light-dark(#f5e6a3, #c2b274);
+    --assumption-ink: light-dark(#16181d, #1f1c12);
+    --ink: light-dark(#16181d, #e9ebef);
+    --muted: light-dark(#5a6070, #9aa1ae);
+    --line: light-dark(#e3e4e8, #2a2e36);
+    --stroke: light-dark(#c9ccd4, #3d424c);
+    --soft: light-dark(#eceef1, #232730);
+    --band: light-dark(#f4f5f7, #14161a);
+    --drawing: light-dark(#2b2f3a, #c3c8d2);
+    --on-ink: light-dark(#fff, #111317);
+    --ink-strong: light-dark(#000, #fff);
+    --hover: light-dark(#f1f2f4, #232730);
+    --dot: light-dark(#d5d8e0, #2c313a);
+    --grid: light-dark(#eceef2, #23272e);
+    --plate-side: light-dark(#dfe1e6, #2a2e36);
+    --solid-side: light-dark(#c4c8d0, #3d424c);
+    /* The dot grid of every drawing surface. */
+    --dots: radial-gradient(var(--dot) 1px, transparent 1px);
+    --backdrop: light-dark(rgba(10, 12, 16, 0.45), rgba(0, 0, 0, 0.6));
+    --serif: "Source Serif 4", Georgia, serif;
+    --sans: "IBM Plex Sans", Arial, sans-serif;
+    --mono: "IBM Plex Mono", ui-monospace, monospace;
+    /* The header (plus its 1px rule) and footer heights, which the screens
+       sharing them subtract. */
+    /* A fluid scale: sizes grow smoothly from a 360px phone to a 1600px
+       laptop instead of jumping at breakpoints (above 1600px the root font
+       size scales everything). The page gutter, section spacing, and the
+       type steps used by more than one component. */
+    --gutter: clamp(1.25rem, 0.75rem + 2.5vw, 3rem);
+    --space-section: clamp(2rem, 1.7rem + 0.8vw, 2.5rem);
+    --space-heading: clamp(1.5rem, 1.25rem + 0.75vw, 2.25rem);
+    --step-0: clamp(1rem, 0.97rem + 0.1vw, 1.0625rem);
+    --step-1: clamp(1.0625rem, 1.03rem + 0.1vw, 1.125rem);
+    --step-2: clamp(1.25rem, 1.2rem + 0.25vw, 1.375rem);
+    --step-3: clamp(1.75rem, 1.6rem + 0.6vw, 2.25rem);
+    --step-4: clamp(2rem, 1.45rem + 1.6vw, 3rem);
+    --step-5: clamp(2.5rem, min(4vw, 7vh), 3.875rem);
+    /* One screen for the home page's sections: the window's height, capped
+       so tall monitors do not stretch them into empty space. */
+    --screen: min(100svh, 57rem);
+    --header-h: 4.5rem;
+    --footer-h: 5.9375rem;
+    font-family: var(--sans);
+    color: var(--ink);
+    background: var(--paper);
+    font-synthesis: none;
+    text-rendering: optimizeLegibility;
+  }
+  :root[data-theme="light"] {
+    color-scheme: light;
+  }
+  :root[data-theme="dark"] {
+    color-scheme: dark;
+  }
+
+  /* Browsers without light-dark() (Safari before 17.5, Chrome before 123)
+     reject the tokens above, so they get the light theme's colors. */
+  @supports not (color: light-dark(#000, #fff)) {
+    :root {
+      --paper: #fbfbfa;
+      --surface: #fff;
+      --assumption-bg: #fefce8;
+      --assumption-line: #f5e6a3;
+      --assumption-ink: #16181d;
+      --ink: #16181d;
+      --muted: #5a6070;
+      --line: #e3e4e8;
+      --stroke: #c9ccd4;
+      --soft: #eceef1;
+      --band: #f4f5f7;
+      --drawing: #2b2f3a;
+      --on-ink: #fff;
+      --ink-strong: #000;
+      --hover: #f1f2f4;
+      --dot: #d5d8e0;
+      --grid: #eceef2;
+      --plate-side: #dfe1e6;
+      --solid-side: #c4c8d0;
+      --backdrop: rgba(10, 12, 16, 0.45);
+    }
+  }
+}

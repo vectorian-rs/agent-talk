@@ -1,0 +1,78 @@
+/* Page layout: the wrap, sections, section headings, and the one-screen-per-section rhythm. */
+
+@layer tokens, base, layout, components;
+
+@layer layout {
+  /* The content column. It is also the "page" container: components
+     inside respond to the width they are given, not the window's. At the
+     fluid gutter, 27rem, 44rem, and 59rem of content match windows of 480,
+     768, and 1024px. */
+  .wrap {
+    container: page / inline-size;
+    width: min(77.5rem, 100% - 2 * var(--gutter));
+    margin-inline: auto;
+  }
+
+  .eyebrow {
+    margin-block-end: 1.75rem;
+    color: var(--muted);
+  }
+
+  .page-section {
+    padding-block: var(--space-section);
+  }
+
+  /* Every section opens the same way: the eyebrow, the heading, and an
+     optional lead under it. */
+  .section-heading {
+    margin-block-end: var(--space-heading);
+  }
+
+  .section-heading .eyebrow {
+    margin-block-end: 0.75rem;
+  }
+
+  .section-heading h2 {
+    max-width: 68.75rem;
+    font-size: var(--step-4);
+  }
+
+  .section-heading > p:not(.eyebrow) {
+    margin-block-start: 0.75rem;
+    color: var(--muted);
+    font-size: var(--step-0);
+  }
+
+  .band-section {
+    background: var(--band);
+    border-block: 1px solid var(--line);
+  }
+
+  .wrap-table th,
+  .wrap-table td {
+    white-space: normal;
+    text-align: start;
+    vertical-align: top;
+    font-size: 0.9375rem;
+  }
+
+  .wrap-table {
+    min-width: 42.5rem;
+  }
+
+  /* The home page reads one screen at a time: a section's anchor lands on
+     its top edge, and on a laptop or larger each section fills at least one
+     screen (capped on tall monitors), its heading at the same height on
+     every screen. The hero shares
+     the first screen with the header, and the last screen with the footer.
+     Phones and short windows scroll freely. */
+  @media (width >= 48em) and (height >= 40em) {
+    main > .page-section {
+      min-height: var(--screen);
+      padding-block-start: clamp(3rem, 8vh, 5rem);
+    }
+    main > #review {
+      min-height: calc(var(--screen) - var(--footer-h));
+    }
+  }
+}

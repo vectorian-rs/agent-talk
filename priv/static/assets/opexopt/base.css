@@ -1,0 +1,340 @@
+/* Base elements, buttons, icons, tables, labels, and heading anchors shared by every page. */
+
+@layer tokens, base, layout, components;
+
+@layer base {
+  * {
+    box-sizing: border-box;
+  }
+
+  /* Sizes are in rem, so the root font size scales the whole page: the
+     reader's default (100%) up to 1600px wide, then growing to 125% at 2560px,
+     so large screens get larger content rather than empty space. */
+  html {
+    font-size: clamp(100%, calc(100% + (100vw - 1600px) / 240), 125%);
+    scroll-behavior: smooth;
+  }
+
+  body {
+    margin: 0;
+    font-size: 1.0625rem;
+    line-height: 1.6;
+  }
+
+  a {
+    color: inherit;
+    text-underline-offset: 4px;
+  }
+
+  button {
+    font: inherit;
+    color: inherit;
+    cursor: pointer;
+  }
+
+  button:disabled {
+    cursor: default;
+  }
+
+  a,
+  button,
+  summary {
+    -webkit-tap-highlight-color: transparent;
+  }
+
+  :focus-visible {
+    outline: 2px solid var(--ink);
+    outline-offset: 5px;
+  }
+
+  [hidden] {
+    display: none !important;
+  }
+
+  h1,
+  h2,
+  h3,
+  p,
+  figure {
+    margin: 0;
+  }
+
+  h1,
+  .section-heading h2 {
+    font-family: var(--serif);
+    font-weight: 400;
+    letter-spacing: -0.045em;
+    line-height: 1.08;
+  }
+
+  em {
+    font-weight: 400;
+  }
+
+  /* Mono labels: every small uppercase label shares this look. The rules
+     for each label set only what differs (size, weight, color). */
+  .small-label,
+  .eyebrow,
+  .site-footer,
+  .workflow-item > details > summary,
+  .field-flag,
+  .vdt-head,
+  .vdt-rule {
+    font: 400 0.75rem var(--mono);
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+  }
+
+  .small-label,
+  .eyebrow {
+    line-height: 1.6;
+  }
+
+  .skip-link {
+    position: fixed;
+    z-index: 10;
+    inset-block-start: 0.75rem;
+    inset-inline-start: 1.25rem;
+    background: var(--ink);
+    color: white;
+    padding: 0.75rem;
+    clip-path: inset(50%);
+  }
+
+  .skip-link:focus {
+    clip-path: none;
+  }
+
+  .login-link:hover,
+  .button-outline:hover {
+    background: var(--hover);
+  }
+
+  .button {
+    display: inline-flex;
+    justify-content: space-between;
+    align-items: center;
+    gap: 0.875rem;
+    padding: 0.8125rem 1.375rem;
+    min-height: 3rem;
+    border-radius: 6px;
+    font-size: 0.9375rem;
+    font-weight: 500;
+    text-decoration: none;
+  }
+
+  .icon {
+    flex: none;
+    width: 1em;
+    height: 1em;
+    vertical-align: -0.14em;
+  }
+
+  .icon-sprite {
+    position: absolute;
+    width: 0;
+    height: 0;
+    overflow: hidden;
+  }
+
+  .button .icon {
+    width: 1.125rem;
+    height: 1.125rem;
+  }
+
+  .button-primary {
+    color: var(--on-ink);
+    background: var(--ink);
+    border: 1px solid var(--ink);
+  }
+
+  .button-primary:hover {
+    background: var(--ink-strong);
+    border-color: var(--ink-strong);
+  }
+
+  .button-outline {
+    border: 1px solid var(--stroke);
+    background: transparent;
+  }
+
+  .table-scroll {
+    overflow-x: auto;
+  }
+
+  table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 0.875rem;
+    font-variant-numeric: tabular-nums;
+  }
+
+  th,
+  td {
+    text-align: end;
+    padding: 0.8125rem 0.9375rem;
+    border-block-end: 1px solid var(--line);
+    white-space: nowrap;
+  }
+
+  tr > :first-child {
+    text-align: start;
+    padding-inline-start: 0;
+  }
+
+  tr > :last-child {
+    padding-inline-end: 0;
+  }
+
+  thead th {
+    font-size: 0.75rem;
+    color: var(--muted);
+    font-weight: 500;
+  }
+
+  tbody th {
+    font-weight: 400;
+  }
+
+  tfoot {
+    font-weight: 500;
+  }
+
+  tfoot th,
+  tfoot td {
+    border-block-end: 0;
+  }
+
+  .text-link {
+    display: inline-block;
+    margin-block-start: 1.5rem;
+    font-size: 0.875rem;
+  }
+
+  /* A link-styled button, level with the buttons beside it. */
+  button.text-link {
+    margin: 0;
+    border: 0;
+    background: none;
+    padding: 0;
+    text-decoration: underline;
+    text-underline-offset: 4px;
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    html {
+      scroll-behavior: auto;
+    }
+  }
+
+  /* Shared pieces */
+  .muted {
+    color: var(--muted);
+  }
+
+  tr > * {
+    transition: background-color 0.2s;
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    tr > * {
+      transition: none;
+    }
+  }
+
+  /* Heading anchors */
+  .heading-anchor {
+    margin-inline-start: 0.25em;
+    color: var(--muted);
+    font-family: var(--mono);
+    font-weight: 400;
+    text-decoration: none;
+    opacity: 0;
+    transition: opacity 0.15s;
+  }
+
+  :is(h2, h3, h4):hover > .heading-anchor,
+  .heading-anchor:focus-visible {
+    opacity: 1;
+  }
+
+  .heading-anchor:hover {
+    color: var(--ink);
+  }
+
+  @media (hover: none) {
+    .heading-anchor {
+      opacity: 0.6;
+    }
+  }
+
+  /* On touch screens every control offers at least a 44px tap target
+     (WCAG 2.5.5); components add their own where they draw small ones. */
+  @media (pointer: coarse) {
+    .button,
+    .login-link,
+    .nav-cta {
+      min-height: 2.75rem;
+      display: inline-flex;
+      align-items: center;
+    }
+    /* Standalone small links: at least 24px tall (WCAG 2.5.8), without
+       moving the text around them. */
+    .heading-anchor {
+      padding: 0.5rem;
+      margin: -0.5rem;
+    }
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    .heading-anchor {
+      transition: none;
+    }
+  }
+
+  /* A linked heading keeps a little air above it; the home page's sections
+     land on their top edge. */
+  [id]:not(main > section) {
+    scroll-margin-block-start: 1rem;
+  }
+
+  /* The closed-beta mark: in the footer, the login notice, and the request. */
+  .status-dot {
+    width: 0.375rem;
+    height: 0.375rem;
+    border-radius: 50%;
+    background: var(--ink);
+    display: inline-block;
+    flex-shrink: 0;
+  }
+
+  /* The dotted drawing surface under every chart, and under the workflow
+     diagram where it is drawn (Workflow.css). */
+  .chart-panel {
+    border: 1px solid var(--line);
+    border-radius: 14px;
+    background: var(--surface) var(--dots) 0 0 / 18px 18px;
+  }
+
+  /* Hidden radios that drive CSS-only switches. Fixed in place, so selecting
+     one never scrolls the page. */
+  .path-radio,
+  .dt-radio,
+  .plan-switch input {
+    position: fixed;
+    inset-block-start: 0;
+    inset-inline-start: 0;
+    opacity: 0;
+    pointer-events: none;
+  }
+
+  @media (width >= 48em) {
+    table {
+      font-size: 1rem;
+    }
+    th,
+    td {
+      padding: 1rem 1.125rem;
+    }
+  }
+}
