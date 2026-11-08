@@ -158,7 +158,7 @@ defmodule AgentTalk.MCPTest do
     assert response.status == 200
     result = decode(response.body)["result"]
     assert result["protocolVersion"] == "2025-11-25"
-    assert result["serverInfo"]["version"] == "0.2.0"
+    assert result["serverInfo"]["version"] == to_string(Application.spec(:agent_talk, :vsn))
     assert result["instructions"] =~ "ring_token"
     session = List.keyfind(response.headers, "mcp-session-id", 0) |> elem(1)
     headers = [{"mcp-session-id", session}, {"mcp-protocol-version", "2025-11-25"}]

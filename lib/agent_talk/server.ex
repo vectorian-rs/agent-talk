@@ -2,7 +2,7 @@ defmodule AgentTalk.Server do
   @moduledoc false
   use Anubis.Server,
     name: "agent-talk",
-    version: "0.2.0",
+    version: Mix.Project.config()[:version],
     capabilities: [:tools],
     instructions: """
     A PM calls register_node with role=pm to create a ring. Save the response and

@@ -43,10 +43,11 @@ defmodule AgentTalk.Web.OperatorLive do
     visible =
       Enum.filter(socket.assigns.messages, fn event ->
         (party == "all" or event.from == party or party in event.to) and
-          String.contains?(
-            String.downcase(Enum.join([event.from, event.message | event.to], " ")),
-            query
-          )
+          (query == "" or
+             String.contains?(
+               String.downcase(Enum.join([event.from, event.message | event.to], " ")),
+               query
+             ))
       end)
 
     assign(socket, :visible_messages, visible)

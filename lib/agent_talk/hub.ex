@@ -56,7 +56,7 @@ defmodule AgentTalk.Hub do
     data = %{
       nodes: public_nodes(state.nodes),
       messages: state.messages,
-      history_limit: history_limit(state)
+      history_limit: state.history_limit
     }
 
     {{:ok, data}, state}
@@ -115,8 +115,9 @@ defmodule AgentTalk.Hub do
 
       if role == nil or valid_id?(role) do
         nodes =
-          public_nodes(updated.nodes)
-          |> Enum.filter(&(&1.ring_id == caller.ring_id and (role == nil or &1.role == role)))
+          ring_nodes(updated, caller.ring_id)
+          |> public_nodes()
+          |> Enum.filter(&(role == nil or &1.role == role))
 
         next_message_id =
           case :queue.peek(caller.inbox) do
@@ -262,7 +263,7 @@ defmodule AgentTalk.Hub do
         end)
 
       event = Map.merge(message, %{to: recipients, from_role: node.role, received_by: []})
-      history = Enum.take([event | state.messages], history_limit(state))
+      history = Enum.take([event | state.messages], state.history_limit)
 
       {{:ok, %{message_id: message.id, delivered_to: recipients}},
        %{state | nodes: nodes, messages: history}}
@@ -333,8 +334,6 @@ defmodule AgentTalk.Hub do
   defp public_nodes(nodes) do
     nodes |> Map.values() |> Enum.sort_by(& &1.node_id) |> Enum.map(&public_node/1)
   end
-
-  defp history_limit(state), do: state.history_limit
 
   defp expire_nodes(state, now) do
     nodes = Map.reject(state.nodes, fn {_id, node} -> now - node.seen_at >= state.ttl_ms end)
