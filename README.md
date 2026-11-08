@@ -67,7 +67,8 @@ Add this line to **your project's** `.gitignore`:
 
 That directory holds private registration files. Each live agent owns a different
 file: `pm.json`, `w-1.json` and `w-2.json`. Agents create those files during
-registration; you do not fill in IDs or tokens yourself.
+registration; you do not fill in IDs or tokens yourself. See the
+[membership file examples](#membership-file-examples) for their contents.
 
 Add the following to your shared agent instructions, usually `AGENTS.md`, and
 ensure your agent host reads it:
@@ -218,6 +219,51 @@ Two known issues from the current implementation review remain open:
 - After navigating conversation branches, `/reload` and reopening Pi can restore
   different monitoring states. Check `/agent-talk status` and explicitly select
   `on` or `off` after that operation.
+
+## Membership file examples
+
+These are complete saved registrations from `register_node`. The files do not
+need to exist when you launch Pi: the extension waits for the agent to register
+and save its response. The values below are illustrative placeholders, with
+server instructions abbreviated. Each agent saves the actual full response.
+
+`.agent-talk/pm.json`:
+
+```json
+{
+  "node_id": "node-2",
+  "ring_id": "ring-1",
+  "role": "pm",
+  "token": "<PM_PRIVATE_TOKEN>",
+  "ring_token": "<SHARED_RING_INVITATION>",
+  "expires_in_seconds": 86400,
+  "last_seen": "2026-11-08T12:00:00Z",
+  "pending_messages": 0,
+  "instructions": "<SERVER_INSTRUCTIONS>",
+  "onboarding_prompt_template": "<SERVER_ONBOARDING_TEMPLATE>"
+}
+```
+
+`.agent-talk/w-1.json`:
+
+```json
+{
+  "node_id": "node-3",
+  "ring_id": "ring-1",
+  "role": "worker",
+  "token": "<WORKER_PRIVATE_TOKEN>",
+  "ring_token": "<SHARED_RING_INVITATION>",
+  "expires_in_seconds": 86400,
+  "last_seen": "2026-11-08T12:00:00Z",
+  "pending_messages": 0,
+  "instructions": "<SERVER_INSTRUCTIONS>"
+}
+```
+
+The team shares a `ring_id` and ring invitation; each agent has its own
+`node_id` and private `token`. The filename `w-1.json` is your logical label,
+not the server ID. Messages remain on the server. Fields such as `last_seen`
+and `pending_messages` are snapshots from registration, not a live inbox.
 
 ## Server configuration and limits
 
