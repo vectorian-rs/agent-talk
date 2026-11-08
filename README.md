@@ -1,48 +1,229 @@
 # AgentTalk
 
-A small Elixir MCP server for a PM coordinating agents in an isolated ring. Run one
-shared server and point every agent at `http://127.0.0.1:4000/mcp`.
+AgentTalk lets a PM agent assign work to other agents and receive their results.
+One local Elixir server holds the inboxes and shows message traffic in a browser.
 
-A **node** is a registered agent. A **ring** groups a PM and its invited agents.
-Agents declare their roles, such as `pm`, `worker` or `reviewer`.
-Presence uses a renewable lease: an agent is considered connected while its
-registration is active. The default lease lasts 24 hours (86,400 seconds).
+For a real project, you start the server, launch your PM and workers, and give
+them their role instructions. With the optional Pi integration enabled, incoming
+mail starts an agent turn or queues a follow-up while the agent is busy:
 
-## Run
+**PM assignment → worker receives → worker works and replies → PM handles result.**
 
-Requires Elixir 1.18+ and a compatible Erlang/OTP version.
+A **node** is one registered agent. A **ring** is a PM and its invited team.
+The server assigns IDs; names such as `w-1` are your project's logical labels.
+
+| Client | Current support |
+| --- | --- |
+| Pi | MCP tools plus optional automatic inbox checks and wake-ups. |
+| Other MCP clients, including Claude and Codex | Register, send and receive through MCP. Automatic wake-up adapters are not implemented yet. |
+
+AgentTalk is optional: your repository's work rules and approval gates stay in
+place. The server routes messages; your role prompts determine what agents do.
+
+## Onboard a repository with Pi
+
+This guide uses one PM and two workers on the same machine. Keep AgentTalk in its
+own checkout. Replace `/path/to/agent-talk` and `/path/to/your-repo` below with your
+actual paths. You need Elixir 1.18+ and compatible Erlang/OTP for the server, plus
+Pi with a working model configuration for the real agents. The integration has
+been tested with Pi 1.5.0.
+
+### 1. Start the shared server
+
+In a terminal for AgentTalk:
 
 ```sh
+git clone https://github.com/vectorian-rs/agent-talk.git /path/to/agent-talk
+cd /path/to/agent-talk
 mix deps.get
-mix run --no-halt
+mix run --no-halt -- --config config/dev.toml
 ```
 
-Development live reload is enabled by default. Saving UI modules under
-`lib/agent_talk/web/` or files under `priv/static/` updates the browser without
-restarting the server, preserving registrations and messages. Dependency and
-configuration changes still require a restart. Reloading is disabled in test
-and production environments.
+If you already have the checkout, start it from there. Leave this terminal open.
+Use the same running server for all team members. Open
+**http://127.0.0.1:4000/** for the operator UI.
 
-Connect your MCP clients using Streamable HTTP. For clients that accept this
-JSON configuration:
+### 2. Prepare your project
 
-```json
-{
-  "mcpServers": {
-    "agent-talk": {
-      "url": "http://127.0.0.1:4000/mcp"
-    }
-  }
-}
+In another terminal, at your project's root:
+
+```sh
+cd /path/to/your-repo
+pi mcp add agent-talk --local --url http://127.0.0.1:4000/mcp
+pi mcp list
+mkdir -p .agent-talk
+chmod 700 .agent-talk
 ```
 
-Every agent must use the same running server to share registrations and messages.
-The server assigns every agent an ID. Save its complete registration response privately.
+The MCP command writes project configuration to `.pi/mcp.json`. Check that
+`agent-talk` is connected and exposes `register_node`, `list_nodes` and
+`communicate`. Pi loads project configuration in a trusted checkout.
 
-## Configuration
+Add this line to **your project's** `.gitignore`:
 
-Server settings come from `config/dev.toml` by default (`config/prod.toml` in a
-production build). Both files start with:
+```gitignore
+/.agent-talk/
+```
+
+That directory holds private registration files. Each live agent owns a different
+file: `pm.json`, `w-1.json` and `w-2.json`. Agents create those files during
+registration; you do not fill in IDs or tokens yourself.
+
+Add the following to your shared agent instructions, usually `AGENTS.md`, and
+ensure your agent host reads it:
+
+```text
+When the operator selects AgentTalk:
+- Follow this repository's role, scope, claims, verification and approval rules.
+- Save every successful registration response privately and atomically in this
+  session's .agent-talk file, mode 0600, before another authenticated call.
+- Keep both tokens out of logs, commits and issue comments. Share only the
+  ring invitation in private onboarding prompts; never share a private node token.
+- When the host notifies you of inbox mail, receive and handle it automatically.
+  Verify the sender and assignment against the project record.
+- Send actual replies through AgentTalk: receipt, acceptance or blocked, and
+  results as appropriate. Do not reply to acknowledgments.
+- The human starts the PM and workers. The host checks inboxes; do not spend
+  model turns on empty polling.
+Without AgentTalk, use the repository's usual workflow.
+```
+
+### 3. Launch the PM
+
+From your project's root, start a real Pi session with the inbox extension:
+
+```sh
+pi -e /path/to/agent-talk/integrations/pi/agent-talk.ts \
+  --agent-talk-membership .agent-talk/pm.json
+```
+
+The extension waits until the agent saves its registration. Paste this prompt:
+
+```text
+Act as this repository's PM using AgentTalk. Automatic inbox handling is enabled.
+
+Read .agent-talk/pm.json privately if it exists and renew that membership with
+role, node_id and token. Otherwise create a ring with register_node(role="pm").
+Follow the registration response. Save every successful complete response
+atomically in .agent-talk/pm.json with mode 0600 before another call.
+If an existing membership expired, rejoin with its saved role and ring_token;
+do not create another PM ring as recovery. Stop if its ring invitation is invalid.
+
+Prepare two private invitations from the returned onboarding template, for
+logical workers w-1 and w-2, both with role worker. Include the PM ID, ring ID,
+ring invitation and each worker's credential-file path: .agent-talk/w-1.json
+or .agent-talk/w-2.json. Each invitation must tell the worker to save its full
+registration privately, verify the PM, send "joined <label>", handle inbox
+notifications automatically, send receipt and acceptance or blocked, perform
+authorized work and send results. Keep project approval gates and do not
+acknowledge acknowledgments. Never include your private node token.
+I will launch the workers.
+
+Handle worker messages automatically and coordinate only authorized work.
+Keep this repository's human approval gates.
+```
+
+The PM's response supplies the private invitations. A ring invitation admits
+members; a private node token authenticates one member. Keep them separate.
+
+### 4. Launch and invite the workers
+
+Open two more terminals in your project's root. In the first:
+
+```sh
+pi -e /path/to/agent-talk/integrations/pi/agent-talk.ts \
+  --agent-talk-membership .agent-talk/w-1.json
+```
+
+In the second:
+
+```sh
+pi -e /path/to/agent-talk/integrations/pi/agent-talk.ts \
+  --agent-talk-membership .agent-talk/w-2.json
+```
+
+Paste the matching PM invitation into each session. It provides the real ring
+invitation and PM ID, with worker instructions equivalent to this text (using
+`w-2` and `.agent-talk/w-2.json` for the second worker):
+
+```text
+Act as this repository's worker w-1. Automatic inbox handling is enabled.
+Use .agent-talk/w-1.json for your complete private registration, saved atomically
+with mode 0600 before another call. Resume only if its role and ring match
+this invitation; otherwise join using role=worker and the invited ring_token.
+
+Verify the invited PM through list_nodes, then send "joined w-1" to that PM ID.
+On inbox notification, receive messages and handle verified PM requests under
+the repository's worker instructions. Send receipt and acceptance or blocked,
+perform authorized work, and send results to the PM. A local print is not a
+reply. Do not acknowledge acknowledgments or bypass human approval gates.
+```
+
+The PM maps each logical worker label to the sender's actual server ID. Separate
+assignments target those IDs; a shared `worker` role does not distinguish workers.
+
+### 5. Check the real team
+
+Give the PM this small first request:
+
+```text
+Ask each worker to reply with its logical label. Report when both replies
+arrive. Do not change project files.
+```
+
+Within the normal 10-second inbox-check interval, the idle workers should wake,
+receive the request and reply. The PM then picks up the replies automatically.
+A busy agent handles its queued notification after its current work finishes.
+
+The UI should show three registrations and messages in both directions.
+`Collected` means fetched from an inbox, not accepted or completed.
+`Last activity` includes host checks; it does not prove the model is working.
+
+You can now give the PM a project task. Keep all sessions open. The human supplies
+goals and required approvals; message pickup does not require manual resumes.
+
+## Daily use and troubleshooting
+
+Resume an existing team with its saved files. Use fresh files for a new team,
+and never share one membership file between live sessions. Start workers as
+separate sessions rather than forks of the PM.
+
+After a full server restart, move old membership files aside privately and
+repeat steps 3–4 to create a new PM ring and invitations. Recover unfinished work
+from the project record; the old inboxes are gone.
+
+| Situation | Action |
+| --- | --- |
+| Check automatic inbox state | Run `/agent-talk status` in that Pi session. |
+| Stop automatic wake-ups | Run `/agent-talk off`. |
+| Resume after Escape/cancellation | Run `/agent-talk on .agent-talk/w-1.json`, using that session's file. |
+| Tools have an old schema | Run `/mcp reconnect agent-talk`; use `/reload` after changing MCP configuration outside Pi. |
+| Mail remains unread | Check that the extension is loaded, the membership path matches the agent's saved file, and the role prompt handles notifications. After three wake-ups for the same unread message, the extension reports stalled. |
+| Connection is unavailable | The watcher retries with backoff, without model turns for empty checks. |
+| Registration expired | Rejoin with the saved role and ring invitation, save the new identity, rediscover peers and reconcile work with the project record. |
+| `invalid node token` | Reload saved credentials. If lost, rejoin as a new identity using the ring invitation; another node's token cannot be reset or reclaimed. |
+| `invalid ring token` | Ask the operator for the current invitation. A full server restart invalidates old rings. |
+| Unknown or expired recipient | Rediscover the member and confirm its identity before resending. A rejected send queues nothing. |
+
+The MCP connection provides tools. The Pi extension provides wake-ups. Connecting
+MCP alone does not start an idle agent turn. Without the extension, ask the agent
+to check its inbox manually. See the [integration contract](integrations/README.md)
+for the boundary between host code and role prompts.
+
+Two known issues from the current implementation review remain open:
+
+- The Pi watcher checks every 10 seconds. Leases of 10 seconds or less can expire
+  between checks, including while waiting for a newly saved registration. Keep
+  the default 24-hour lease for this onboarding path.
+- After navigating conversation branches, `/reload` and reopening Pi can restore
+  different monitoring states. Check `/agent-talk status` and explicitly select
+  `on` or `off` after that operation.
+
+## Server configuration and limits
+
+Application settings come from TOML, with no OS environment-variable overrides.
+`config/dev.toml` is the default; a production build defaults to `config/prod.toml`.
+Both contain:
 
 ```toml
 port = 4000
@@ -50,281 +231,96 @@ node_ttl_seconds = 86400
 message_history_limit = 50
 ```
 
-Choose a file explicitly without environment variables:
+Select a file with `--config` as in step 1. Selecting `prod.toml` changes settings;
+it does not change the Elixir build mode. Positive integer settings are required,
+the port must be 1..65535, and unknown or malformed settings stop startup. The
+startup log reports the version, config file, lease and history limit.
 
-```sh
-mix run --no-halt -- --config config/dev.toml
-mix run --no-halt -- --config config/prod.toml
-```
+If you change the port, update the MCP URL and pass the same URL to every Pi
+session with `--agent-talk-url http://127.0.0.1:<port>/mcp`.
 
-Run one server, using the desired file. Numeric settings must be positive integers;
-the port must be 1..65535. Missing, malformed or unknown settings stop startup.
-The startup log identifies the file, lease duration and history limit.
-Configuration edits require a coordinated restart and clear in-memory state.
+Browser origins default to localhost and 127.0.0.1 at the configured port.
+An optional `allowed_origins` TOML array changes them. Requests without an
+`Origin` header are accepted. The UI session secret is generated at startup.
 
-Browser origins default to `http://localhost:<port>` and `http://127.0.0.1:<port>`.
-To change them, add an `allowed_origins` array to the TOML file. Requests without
-an `Origin` header remain accepted. The UI session secret is generated at startup;
-no application settings are read from environment variables.
+The listener binds to `127.0.0.1` for trusted local use. Remote access needs an
+authenticated HTTPS boundary and an appropriate browser-origin allowlist.
 
-## Live operator UI
+Rings, registrations and inboxes are **in memory**. Coordinate restarts:
+a full server restart clears them. Expiry also discards a node's inbox, and
+receiving removes messages before the client response. This is best-effort
+coordination; keep durable work and results in your project's issue/task record.
 
-Open **http://127.0.0.1:4000/** in a browser after starting the server. The operator
-view shows connected agents, messages from sender to recipients, and collection
-status. Updates arrive over a WebSocket as agents register, send, or collect
-messages. Expired agents disappear automatically.
+Each inbox holds up to 1,000 messages; each message is at most 65,536 UTF-8 bytes.
+The operator log retains the last 50 successful sends by default, across rings.
+A broadcast occupies one log entry. Reading the UI never consumes inboxes.
 
-The UI uses **Phoenix LiveView and Phoenix PubSub** with OpexOpt's original CSS
-tokens, base styles, layout, and locally served fonts. It supports light/dark
-themes, message search, and filtering by agent. No Node.js build step is required.
+## MCP reference
 
-The shared operator history retains the **last 50 successful sends** by default,
-as set by `message_history_limit`, newest first. A broadcast occupies one entry
-and lists all its recipients. Reading the UI never drains an agent inbox. `Collected` means a
-recipient fetched a message; it does not mean the task is complete. History
-survives inbox reads and registration expiry, and resets when the hub restarts.
-
-To watch a sample conversation, keep the server and browser open, then run this
-in another terminal:
-
-```sh
-mix run --no-start examples/demo.exs --url http://127.0.0.1:4000
-```
-
-This creates a separate demo ring on the existing server and sends only
-between its members. Substitute your port if needed.
-
-## Three tools
-
-| Tool | Purpose |
+| Tool | Arguments and behavior |
 | --- | --- |
-| `register_node` | Create a ring, join through an invitation, or renew your membership. |
-| `list_nodes` | Discover active members of your ring, optionally filtered by role. |
-| `communicate` | Send within your ring, or receive messages from your inbox. |
+| `register_node` | Fresh PM: `{"role":"pm"}`. Invited member: `{"role":"worker","ring_token":"<INVITATION>"}`. Renew: `{"role":"worker","node_id":"<ID>","token":"<PRIVATE_TOKEN>"}`. |
+| `list_nodes` | Own `node_id` and `token`, plus optional `role` filter. Returns active members of the caller's ring and the caller's `inbox` metadata without removing mail. |
+| `communicate` | Own `node_id` and `token`, plus `action`. Send takes `message` and either `to: ["<ID>", ...]` or `to_role`. Receive takes no send fields and drains the FIFO inbox. |
 
-Examples show tool arguments, wrapped by the client in `tools/call`.
+These are tool arguments; the MCP client wraps them in `tools/call`.
+`to_role: "all"` targets every other member of the caller's ring. Role broadcasts
+exclude the sender. Discovery, direct messages and broadcasts cannot cross rings.
+Fan-out is atomic: an invalid recipient or full inbox rejects the whole send.
 
-A new PM creates a ring with one argument:
+Registration returns `node_id`, `ring_id`, `role`, private `token`, shared
+`ring_token`, `expires_in_seconds`, `instructions` and presence/inbox fields.
+PMs also receive `onboarding_prompt_template`. Save the complete response, replacing
+the previous file through a same-directory temporary file and rename, mode `0600`.
 
-```json
-{"role": "pm"}
-```
+Roles use 1..64 letters, digits, underscores, dots or hyphens; `all` is reserved.
+Roles are labels, not authorization or human approval. IDs are assigned from a
+monotonic counter and never reused within the running Erlang VM, including after
+node expiry or Hub restart. Both tokens use 32 random bytes hashed with SHA-256.
 
-The response contains `node_id`, `ring_id`, `role`, a private node `token`, the
-shared `ring_token`, `expires_in_seconds` and `instructions`. PMs also receive
-`onboarding_prompt_template`. Fill its `<ROLE>` and `<RING_TOKEN>` placeholders
-to prepare another agent's private startup prompt. Never put the PM's private
-node token in that prompt.
+Authenticated discovery, communication and renewal reset only the caller's lease,
+even if discovery/communication later fail argument validation. Incoming mail
+and an open MCP connection do not renew recipients. Renewal preserves identity,
+tokens, ring and inbox; it cannot change role or ring. After expiry, joining with
+the invitation returns a new ID/token in the same ring. A fresh role-only PM call
+creates another ring. Invitations survive member expiry until the server restarts.
 
-An invited agent chooses its role and joins:
+`list_nodes.inbox` contains `pending_messages` and `next_message_id` (null when
+empty), even with a role filter. Receive returns messages with `id`, `from`,
+`ring_id`, `message` and `sent_at`. Send returns `message_id` and `delivered_to`;
+the latter means queued at that instant. Require an application-level reply
+before treating work as accepted. Tool errors use `isError: true`.
 
-```json
-{"role": "worker", "ring_token": "<RING_TOKEN_FROM_PM>"}
-```
+## Development and examples
 
-Roles use 1..64 letters, digits, underscores, dots or hyphens; `all` is reserved
-for broadcasts. Roles are declared labels, not authorization or human approval.
-Joining returns a new ID and private token. IDs are assigned from a monotonic
-counter and never reused within the running Erlang VM, including after node
-expiry or a hub restart. Clients cannot choose IDs.
+These scripts are developer checks; they are not required to onboard a real team.
 
-**Save every successful registration response before another authenticated
-call.** Replace the previous credentials atomically with file mode `0600`, using
-a stable local session name such as `.agent-talk/pm.json` or `.agent-talk/w-1.json`.
-The folder is ignored. Each session owns its file; never print credentials in
-logs, commits or issue comments. Share only the ring invitation in private
-onboarding prompts. Both tokens are generated from 32 random bytes hashed with
-SHA-256. The ring token admits members; the private token authenticates one node.
-
-Discover members using your assigned ID and private token:
-
-```json
-{"node_id": "<YOUR_ID>", "token": "<YOUR_PRIVATE_TOKEN>", "role": "worker"}
-```
-
-Omit `role` to list every active member of your ring. Neither token appears in
-these results. The response also includes the caller's `inbox` metadata:
-`pending_messages` and `next_message_id` (null when empty), even with a role filter.
-Checking this metadata renews the caller without removing messages. The PM broadcasts
-through `communicate`:
-
-```json
-{
-  "action": "send",
-  "node_id": "<PM_ID>",
-  "token": "<PM_PRIVATE_TOKEN>",
-  "to_role": "worker",
-  "message": "Implement your assigned part and reply when ready."
-}
-```
-
-Use `to: ["<DISCOVERED_ID>", "<ANOTHER_ID>"]` for selected members, or
-`to_role: "all"` for every other member. Broadcasts exclude the sender.
-Discovery, direct sends and broadcasts cannot cross rings. An invalid recipient
-rejects the whole send. Workers receive with their own credentials:
-
-```json
-{"action": "receive", "node_id": "<YOUR_ID>", "token": "<YOUR_PRIVATE_TOKEN>"}
-```
-
-Receive returns FIFO messages with `id`, `from`, `ring_id`, `message` and
-`sent_at`, then empties the inbox. Reply using `action: "send"` and the PM's
-**discovered or invited ID**. Project labels such as CeleraTax's `w-1` remain
-separate from the server-assigned transport ID.
-
-## Startup prompts
-
-For a new PM session:
-
-```text
-Follow this project's PM instructions. Resume this session's saved AgentTalk
-registration, or create a ring with register_node(role="pm"). Follow the returned
-instructions and prepare onboarding prompts from its template. The human starts
-other sessions; do not start them yourself.
-```
-
-For an invited agent, use the PM's returned template with its ring token and the
-agent's chosen role. The server's initialization instructions, tool descriptions
-and registration response explain the protocol; no extra onboarding tool is needed.
-
-## Automatic messages in Pi
-
-An optional Pi extension checks inbox metadata every 10 seconds and requests an
-agent turn when mail arrives. A busy agent gets a queued follow-up. The main agent
-receives messages, performs authorized work and sends replies. Empty checks use no
-model turns; they also renew membership and update **Last activity** in the UI.
-This timestamp indicates broker contact, not task progress. No polling subagent is needed.
-
-Keep the MCP connection above configured. From your project, start the PM with:
-
-```sh
-pi -e /path/to/agent-talk/integrations/pi/agent-talk.ts \
-  --agent-talk-membership .agent-talk/pm.json
-```
-
-Start each worker the same way, using its own file (`w-1.json`, `w-2.json`, etc.).
-The extension waits if the file does not exist yet. Give the PM this startup prompt:
-
-```text
-Follow this project's PM instructions using AgentTalk. Resume .agent-talk/pm.json,
-or create a ring as pm. Save every successful registration response atomically
-with mode 0600 before another call. Prepare private worker invitations.
-Automatic inbox handling is enabled for this session: receive and handle inbox
-notifications, process worker replies and assign the next authorized work.
-Keep the project's human approval gates.
-```
-
-Include this instruction in each worker's invitation, with its actual file path:
-
-```text
-Save your complete registration in .agent-talk/w-1.json, atomically with mode 0600.
-Automatic inbox handling is enabled for this session. On notification, receive
-messages, verify the PM and assignment, send receipt and acceptance or blocked,
-perform authorized work and send the result to the PM. Keep human approval gates.
-```
-
-The human starts the sessions once. After that, PM assignments → worker pickup →
-worker replies → PM handling run automatically while the sessions stay open.
-These startup instructions select automatic handling over an older adapter's
-operator-resume wording; the host timer does the polling. Project work rules still apply.
-
-Use `/agent-talk off` to disable or `/agent-talk on .agent-talk/w-1.json` to enable
-inside a session where the extension is loaded; `/agent-talk status` shows its state.
-Escape/cancellation pauses automatic wake-ups; use `on` to resume. Settings persist
-in the Pi session without credentials. New/forked sessions require their own membership.
-Use `--agent-talk-url http://127.0.0.1:<port>/mcp` for a different server.
-
-Each live session must own a different credential file and membership. The watcher
-does not register agents, consume mail, send replies or launch sessions. Connection
-failures retry with backoff; authentication failures request one recovery turn.
-Three wake-ups for the same unread head message produce a visible stalled status
-instead of unbounded model retries. It keeps checking for credential changes or new mail.
-
-The polling module is independent of Pi. Claude and Codex need their own host
-adapters that start or queue turns; those adapters are not implemented yet.
-Plain MCP clients retain the existing manual workflow. See the
-[integration contract](integrations/README.md) for the code/prompt boundary.
-
-## Leases and recovery
-
-The default membership lease is 86,400 seconds; use the returned duration.
-Authenticated `list_nodes`, `communicate` and renewal reset only the caller's
-lease. Discovery and communication do this even if later argument validation
-fails. Incoming messages and open MCP connections do not renew a recipient.
-
-Renew an active membership with the same role, ID and private token:
-
-```json
-{"role": "worker", "node_id": "<YOUR_ID>", "token": "<YOUR_PRIVATE_TOKEN>"}
-```
-
-Renewal preserves both tokens, ID, ring and inbox. Roles and rings cannot be
-changed through renewal. An idle host timer can renew around every third of the
-lease duration, without an LLM turn or endless agent polling. `receive` drains
-messages, so use registration for a heartbeat.
-
-Expiry occurs at the exact lease boundary; calls remove expired nodes before
-acting, and a one-second sweep removes idle members. Expiry discards the node's
-inbox. Rejoin with **role and saved ring_token**, save the new ID/token, rediscover
-members and reconcile work with the project's durable record. An expired ID
-cannot be renewed or reclaimed. A fresh role-only PM call creates a different
-ring. Rings and invitations remain valid until the server restarts.
-
-| Tool error | Recovery |
+| Script | Purpose |
 | --- | --- |
-| `invalid ring token` | Get the current invitation from the PM; a server restart invalidates old rings. |
-| `invalid node token` | Reload this session's saved credentials. If lost, rejoin with the invitation as a new identity and notify the PM; this does not take over the old ID. |
-| `node is not registered or has expired; join again with role and ring_token` | Rejoin the same ring, save the new identity and recover assigned work. |
-| `unknown or expired recipients: …` / `no matching recipients` | Discover current members in your ring before retrying. Nothing was queued. |
+| `examples/demo.exs` | Scripted PM/two-worker exchange. Isolated by default; `--url http://127.0.0.1:4000` sends demo traffic in a separate ring on an existing server. |
+| `examples/lease_smoke.exs` | Three-client registration, renewal, idle expiry, rejoining, delivery and ring-isolation checks on an isolated short-lease server. |
+| `examples/pi_smoke.exs` | Three actual Pi processes with a scripted local model verify automatic pickup and replies. No paid model calls or trial-server access. |
 
-These are `isError: true` tool results, not transport failures. There is no
-unauthenticated reset of another node's token. An inbox holds 1,000 messages;
-a message is limited to 65,536 UTF-8 bytes. `delivered_to` means queued at that
-instant, not collected or completed: recipient expiry can discard a just-queued
-message. Require an application-level reply before treating a handoff as
-accepted. Operator history can still show the uncollected send afterward.
-
-The operator UI observes all rings without draining inboxes or exposing tokens.
-History, rings, credentials and inboxes are in memory. A full server restart
-loses them all; coordinate it with the operator. The HTTP listener binds to
-`127.0.0.1` for trusted local use. Remote deployment needs an authenticated HTTPS
-boundary and an appropriate browser-origin allowlist.
-
-## Demo and checks
-
-Run an isolated PM → two workers → PM exchange on an automatically assigned port:
-
-```sh
-mix run --no-start examples/demo.exs
-```
-
-For a three-client smoke test covering invitations, renewal, expiry, fresh IDs,
-mailbox loss, recovered delivery and ring isolation:
-
-```sh
-mix run --no-start examples/lease_smoke.exs
-```
-
-The smoke test uses its own hub, port and two-second lease without changing
-config files, connecting to the trial server or printing tokens.
+Run from the AgentTalk checkout:
 
 ```sh
 mix format --check-formatted
 mix compile --warnings-as-errors
 mix test
 node --test integrations/polling/*.test.mjs integrations/pi/*.test.mjs
-```
-
-The optional Pi integration requires Pi 1.5+ and Node 24+ for its tests. Exercise
-three actual Pi processes against an isolated broker with a local scripted model:
-
-```sh
+mix run --no-start examples/demo.exs
+mix run --no-start examples/lease_smoke.exs
 mix run --no-start examples/pi_smoke.exs
 ```
 
-The smoke test verifies automatic wake-up, tool-based assignment pickup, worker
-replies and PM collection. It uses a deterministic test provider, makes no paid
-model calls, prints no credentials and never connects to the trial server.
+Node 24+ runs the integration tests. The Pi smoke checks transport, tool execution
+and wake-up mechanics; it does not evaluate a real model's compliance with project
+prompts. Step 5 above checks your configured agents.
 
-Built with [Anubis MCP](https://hexdocs.pm/anubis_mcp/readme.html), Bandit,
-Phoenix LiveView/PubSub and a supervised GenServer. The MCP API has three tools.
+The operator UI uses Phoenix LiveView/PubSub and vendored OpexOpt CSS/fonts,
+with no Node build step. Development live reload watches `lib/agent_talk/web/`
+and `priv/static/`. Dependency/configuration changes require a coordinated restart.
+Reloading is disabled in test and production builds.
+
+Built with [Anubis MCP](https://hexdocs.pm/anubis_mcp/readme.html), Bandit and
+Phoenix, with a supervised GenServer for membership and mailboxes.
