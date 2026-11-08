@@ -143,7 +143,10 @@ Discover members using your assigned ID and private token:
 ```
 
 Omit `role` to list every active member of your ring. Neither token appears in
-these results. The PM broadcasts through `communicate`:
+these results. The response also includes the caller's `inbox` metadata:
+`pending_messages` and `next_message_id` (null when empty), even with a role filter.
+Checking this metadata renews the caller without removing messages. The PM broadcasts
+through `communicate`:
 
 ```json
 {
@@ -183,6 +186,64 @@ other sessions; do not start them yourself.
 For an invited agent, use the PM's returned template with its ring token and the
 agent's chosen role. The server's initialization instructions, tool descriptions
 and registration response explain the protocol; no extra onboarding tool is needed.
+
+## Automatic messages in Pi
+
+An optional Pi extension checks inbox metadata every 10 seconds and requests an
+agent turn when mail arrives. A busy agent gets a queued follow-up. The main agent
+receives messages, performs authorized work and sends replies. Empty checks use no
+model turns; they also renew membership and update **Last activity** in the UI.
+This timestamp indicates broker contact, not task progress. No polling subagent is needed.
+
+Keep the MCP connection above configured. From your project, start the PM with:
+
+```sh
+pi -e /path/to/agent-talk/integrations/pi/agent-talk.ts \
+  --agent-talk-membership .agent-talk/pm.json
+```
+
+Start each worker the same way, using its own file (`w-1.json`, `w-2.json`, etc.).
+The extension waits if the file does not exist yet. Give the PM this startup prompt:
+
+```text
+Follow this project's PM instructions using AgentTalk. Resume .agent-talk/pm.json,
+or create a ring as pm. Save every successful registration response atomically
+with mode 0600 before another call. Prepare private worker invitations.
+Automatic inbox handling is enabled for this session: receive and handle inbox
+notifications, process worker replies and assign the next authorized work.
+Keep the project's human approval gates.
+```
+
+Include this instruction in each worker's invitation, with its actual file path:
+
+```text
+Save your complete registration in .agent-talk/w-1.json, atomically with mode 0600.
+Automatic inbox handling is enabled for this session. On notification, receive
+messages, verify the PM and assignment, send receipt and acceptance or blocked,
+perform authorized work and send the result to the PM. Keep human approval gates.
+```
+
+The human starts the sessions once. After that, PM assignments → worker pickup →
+worker replies → PM handling run automatically while the sessions stay open.
+These startup instructions select automatic handling over an older adapter's
+operator-resume wording; the host timer does the polling. Project work rules still apply.
+
+Use `/agent-talk off` to disable or `/agent-talk on .agent-talk/w-1.json` to enable
+inside a session where the extension is loaded; `/agent-talk status` shows its state.
+Escape/cancellation pauses automatic wake-ups; use `on` to resume. Settings persist
+in the Pi session without credentials. New/forked sessions require their own membership.
+Use `--agent-talk-url http://127.0.0.1:<port>/mcp` for a different server.
+
+Each live session must own a different credential file and membership. The watcher
+does not register agents, consume mail, send replies or launch sessions. Connection
+failures retry with backoff; authentication failures request one recovery turn.
+Three wake-ups for the same unread head message produce a visible stalled status
+instead of unbounded model retries. It keeps checking for credential changes or new mail.
+
+The polling module is independent of Pi. Claude and Codex need their own host
+adapters that start or queue turns; those adapters are not implemented yet.
+Plain MCP clients retain the existing manual workflow. See the
+[integration contract](integrations/README.md) for the code/prompt boundary.
 
 ## Leases and recovery
 
@@ -251,7 +312,19 @@ config files, connecting to the trial server or printing tokens.
 mix format --check-formatted
 mix compile --warnings-as-errors
 mix test
+node --test integrations/polling/*.test.mjs integrations/pi/*.test.mjs
 ```
+
+The optional Pi integration requires Pi 1.5+ and Node 24+ for its tests. Exercise
+three actual Pi processes against an isolated broker with a local scripted model:
+
+```sh
+mix run --no-start examples/pi_smoke.exs
+```
+
+The smoke test verifies automatic wake-up, tool-based assignment pickup, worker
+replies and PM collection. It uses a deterministic test provider, makes no paid
+model calls, prints no credentials and never connects to the trial server.
 
 Built with [Anubis MCP](https://hexdocs.pm/anubis_mcp/readme.html), Bandit,
 Phoenix LiveView/PubSub and a supervised GenServer. The MCP API has three tools.

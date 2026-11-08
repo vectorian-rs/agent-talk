@@ -14,8 +14,10 @@ defmodule AgentTalk.Server do
     authenticate individual agents. Never share a private node token.
     Use node_id and your private token with list_nodes and communicate. Discovery
     and delivery are restricted to your ring. Send to discovered IDs or to_role;
-    use action=receive between tasks to drain your inbox. This server does not
-    start or wake agents; do not run endless agent polling.
+    use action=receive when notified or between tasks to drain your inbox. An optional
+    host integration polls list_nodes.inbox and wakes the session when mail arrives.
+    Without an integration, the operator resumes idle agents. This server does not
+    start agents; do not use LLM turns for empty polling.
     Authenticated discovery, communication and renewal reset your lease (24 hours
     by default; use the returned duration). Renew with role, node_id and token.
     Expiry discards your inbox. Rejoin the same ring with role and ring_token for

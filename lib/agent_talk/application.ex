@@ -20,7 +20,8 @@ defmodule AgentTalk.Application do
     opts = [strategy: :one_for_one, name: AgentTalk.Supervisor]
 
     Logger.info(
-      "AgentTalk config: #{Application.fetch_env!(:agent_talk, :config_file)}; " <>
+      "AgentTalk v#{Application.spec(:agent_talk, :vsn)} config: " <>
+        "#{Application.fetch_env!(:agent_talk, :config_file)}; " <>
         "registration lease: #{div(ttl_ms, 1000)} seconds; message history: #{history_limit}"
     )
 

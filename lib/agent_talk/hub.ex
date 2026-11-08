@@ -118,7 +118,14 @@ defmodule AgentTalk.Hub do
           public_nodes(updated.nodes)
           |> Enum.filter(&(&1.ring_id == caller.ring_id and (role == nil or &1.role == role)))
 
-        {{:ok, %{ring_id: caller.ring_id, nodes: nodes}}, updated}
+        next_message_id =
+          case :queue.peek(caller.inbox) do
+            {:value, message} -> message.id
+            :empty -> nil
+          end
+
+        inbox = %{pending_messages: :queue.len(caller.inbox), next_message_id: next_message_id}
+        {{:ok, %{ring_id: caller.ring_id, nodes: nodes, inbox: inbox}}, updated}
       else
         {{:error, "invalid role filter"}, updated}
       end
@@ -177,8 +184,10 @@ defmodule AgentTalk.Hub do
         Save this complete response privately before another call; never publish either token.
         Renew with role, node_id and token. Use list_nodes with node_id and token to discover
         members of this ring; optionally filter by role. Use communicate to send to those IDs
-        or to_role, or receive your inbox between tasks. Wait for the operator to resume idle
-        agents; do not start endless polling or other agents. After expiry, join again with
+        or to_role, or receive your inbox when notified or between tasks. An optional host
+        integration can check list_nodes.inbox and wake your session without draining mail.
+        Without an integration, the operator resumes idle agents. Do not use LLM turns for
+        empty polling or start other agents. After expiry, join again with
         role and ring_token, save the new identity, and reconcile work with the project record.
         Ring tokens invite members; only your private node token authenticates your calls.
         """

@@ -126,6 +126,9 @@ defmodule AgentTalk.Web.OperatorLive do
                   <p class="agent-name">{node.node_id}</p>
                   <p class="agent-role">{role_name(node.role)} · {node.ring_id}</p>
                   <p class="agent-pending">{node.pending_messages} in inbox</p>
+                  <p class="agent-activity">
+                    Last activity <time datetime={node.last_seen} title={node.last_seen}>{clock(node.last_seen)} UTC</time>
+                  </p>
                 </div>
                 <span class="agent-online" aria-label="Registration active"></span>
               </li>

@@ -1,5 +1,10 @@
 defmodule AgentTalk.Tools.ListNodes do
-  @moduledoc "List active members of your ring, optionally filtered by role. Authenticates and renews only your lease."
+  @moduledoc """
+  List active members of your ring, optionally filtered by role. Also returns your
+  inbox's pending_messages and next_message_id without removing messages, even with
+  a role filter. Authenticates and renews only your lease. Host integrations can
+  poll this metadata and wake your session; the session receives and handles mail.
+  """
   use Anubis.Server.Component, type: :tool, name: "list_nodes"
 
   schema do

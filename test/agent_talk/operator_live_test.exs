@@ -22,6 +22,12 @@ defmodule AgentTalk.OperatorLiveTest do
     assert has_element?(view, "#agent-count", "3")
     assert has_element?(view, "#agent-#{first.node_id} .agent-role", "Worker · #{pm.ring_id}")
 
+    assert has_element?(
+             view,
+             "#agent-#{first.node_id} .agent-activity time[datetime='#{first.last_seen}']",
+             "UTC"
+           )
+
     assert {:ok, %{message_id: id}} =
              Hub.communicate(
                auth(pm, %{action: "send", to_role: "worker", message: "Build the operator view"})
@@ -38,6 +44,14 @@ defmodule AgentTalk.OperatorLiveTest do
     refute credential_leak, "the human UI must not expose node or ring tokens"
     assert {:ok, %{messages: [%{id: ^id}]}} = Hub.communicate(auth(first, %{action: "receive"}))
     assert has_element?(view, "#message-#{id} .delivery-status", "Collected 1/2")
+    {:ok, %{nodes: nodes}} = Hub.snapshot()
+    active = Enum.find(nodes, &(&1.node_id == first.node_id))
+
+    assert has_element?(
+             view,
+             "#agent-#{first.node_id} .agent-activity time[datetime='#{active.last_seen}']"
+           )
+
     assert {:ok, %{messages: [%{id: ^id}]}} = Hub.communicate(auth(second, %{action: "receive"}))
     assert has_element?(view, "#message-#{id} .delivery-status", "Collected")
     assert has_element?(view, "#agent-#{first.node_id} .agent-pending", "0 in inbox")

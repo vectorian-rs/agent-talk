@@ -89,6 +89,34 @@ defmodule AgentTalk.HubTest do
              Hub.register(%{worker | ring_token: "wrong-ring"}, hub)
   end
 
+  test "inbox notifications do not consume mail and distinguish successive equal-size batches", %{
+    hub: hub,
+    pm: pm
+  } do
+    worker = join(hub, pm)
+
+    assert {:ok, %{message_id: first}} =
+             send_message(hub, pm, %{to: [worker.node_id], message: "One"})
+
+    for _ <- 1..2 do
+      assert {:ok, %{nodes: [], inbox: %{pending_messages: 1, next_message_id: ^first}}} =
+               Hub.list_nodes(auth(worker, %{role: "absent"}), hub)
+    end
+
+    assert {:ok, %{messages: [%{id: ^first}]}} = receive_messages(hub, worker)
+
+    assert {:ok, %{inbox: %{pending_messages: 0, next_message_id: nil}}} =
+             Hub.list_nodes(auth(worker), hub)
+
+    assert {:ok, %{message_id: second}} =
+             send_message(hub, pm, %{to: [worker.node_id], message: "Two"})
+
+    refute first == second
+
+    assert {:ok, %{inbox: %{pending_messages: 1, next_message_id: ^second}}} =
+             Hub.list_nodes(auth(worker), hub)
+  end
+
   test "ring invitations never authorize another node's messages or discovery", %{
     hub: hub,
     pm: pm

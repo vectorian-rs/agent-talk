@@ -46,6 +46,8 @@
   .agent-name { font-size: .88rem; line-height: 1.35; font-weight: 500; overflow-wrap: anywhere; }
   .agent-role { font-size: .75rem; color: var(--muted); margin-top: .15rem; }
   .agent-pending { font: .65rem var(--mono); color: var(--muted); margin-top: .5rem; }
+  .agent-activity { font: .6rem var(--mono); color: var(--muted); margin-top: .35rem; line-height: 1.6; }
+  .agent-activity time { white-space: nowrap; }
   .presence-note { border-top: 1px solid var(--line); padding-top: 1.2rem; margin-top: .5rem; }
   .presence-note .small-label { font-size: .65rem; color: var(--muted); }
   .presence-note p { font-size: .78rem; color: var(--muted); margin-top: .45rem; line-height: 1.7; }
