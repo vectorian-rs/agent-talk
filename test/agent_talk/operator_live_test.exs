@@ -86,7 +86,13 @@ defmodule AgentTalk.OperatorLiveTest do
     worker = join(pm, "hiko / w-1")
     other_pm = register(%{role: "pm", project: "celeratax", name: "celeratax / pm"})
     other_worker = join(other_pm, "celeratax / w-1")
-    send_message(pm, worker.node_id, "<script>window.agentInjected = true</script>")
+
+    send_message(
+      pm,
+      worker.node_id,
+      "<script>window.agentInjected = true</script> https://example.com/review?a=1&b=2"
+    )
+
     send_message(other_pm, other_worker.node_id, "Tax task")
     {:ok, view, _} = live(build_conn(), "/")
     assert has_element?(view, "#ring-select option[value='#{pm.ring_id}']", "hiko")
@@ -102,6 +108,12 @@ defmodule AgentTalk.OperatorLiveTest do
     refute has_element?(view, "#message-stream", "Tax task")
     assert render(view) =~ "&lt;script&gt;"
     refute has_element?(view, "#message-stream script")
+
+    assert has_element?(
+             view,
+             "#message-stream a[href='https://example.com/review?a=1&b=2'][rel='noopener noreferrer']"
+           )
+
     send_message(other_pm, other_worker.node_id, "Unselected ring update")
     assert has_element?(view, "#ring-select option[selected][value='#{pm.ring_id}']")
     refute has_element?(view, "#message-stream", "Unselected ring update")

@@ -255,7 +255,7 @@ defmodule AgentTalk.Web.OperatorLive do
                   </div>
                   <time datetime={event.sent_at}>{clock(event.sent_at)}</time>
                 </div>
-                <p class="message-body">{event.message}</p>
+                <p class="message-body"><%= for part <- AgentTalk.Web.MessageText.parts(event.message) do %><a :if={part.url} href={part.url} target="_blank" rel="noopener noreferrer">{part.text}</a>{if is_nil(part.url), do: part.text}<% end %></p>
                 <div class="message-footer">
                   <span class="small-label message-kind">{event.ring_id} · {if length(event.to) > 1, do: "Broadcast · #{length(event.to)} recipients", else: "Direct message"}</span>
                   <span class={["delivery-status", event.received_by != [] && "delivery-collected"]} title="Collected means a recipient fetched the message from its inbox.">
