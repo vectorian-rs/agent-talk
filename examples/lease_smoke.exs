@@ -11,6 +11,7 @@ verify.(
 ttl_ms = 2000
 Application.put_env(:agent_talk, :node_ttl_ms, ttl_ms)
 Application.put_env(:agent_talk, :http_enabled, false)
+Application.put_env(:agent_talk, :membership_file, nil)
 Logger.configure(level: :warning)
 {:ok, _} = Application.ensure_all_started(:agent_talk)
 {:ok, _} = Finch.start_link(name: Anubis.Finch)

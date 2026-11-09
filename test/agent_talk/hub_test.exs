@@ -42,6 +42,61 @@ defmodule AgentTalk.HubTest do
     assert same_invitation, "saveable registration responses must retain the ring invitation"
   end
 
+  test "display labels can be supplied and updated without changing membership", %{hub: hub} do
+    pm = register(hub, %{role: "pm", project: "hiko", name: "hiko / pm"})
+    worker = join(hub, pm)
+    assert pm.project == "hiko"
+    assert pm.name == "hiko / pm"
+    assert worker.name == worker.node_id
+    send_message(hub, pm, %{to: [worker.node_id], message: "Task"})
+
+    assert {:ok, %{nodes: nodes, inbox: %{pending_messages: 1}}} =
+             Hub.list_nodes(auth(worker, %{project: "hiko", name: "hiko / w-1"}), hub)
+
+    assert Enum.find(nodes, &(&1.node_id == worker.node_id)).name == "hiko / w-1"
+    assert Enum.find(nodes, &(&1.node_id == pm.node_id)).name == "hiko / pm"
+
+    renewed = register(hub, Map.take(worker, [:role, :node_id, :token]))
+    assert renewed.name == "hiko / w-1"
+    assert renewed.project == "hiko"
+    assert renewed.node_id == worker.node_id
+    assert renewed.token == worker.token, "labels must not rotate credentials"
+    assert {:ok, %{messages: [%{message: "Task"}]}} = receive_messages(hub, renewed)
+
+    assert {:error, "invalid node token"} =
+             Hub.list_nodes(auth(%{worker | token: "incorrect"}, %{name: "overwrite"}), hub)
+
+    assert {:ok, %{nodes: latest}} = Hub.list_nodes(auth(pm), hub)
+    assert Enum.find(latest, &(&1.node_id == worker.node_id)).name == "hiko / w-1"
+  end
+
+  test "invalid labels are rejected and message history retains names after expiry", %{
+    hub: hub,
+    clock: clock
+  } do
+    for label <- ["", " ", "bad\nname", String.duplicate("x", 129), 42] do
+      assert {:error, _} = Hub.register(%{role: "pm", name: label}, hub)
+    end
+
+    pm = register(hub, %{role: "pm", project: "hiko", name: "hiko / pm"})
+
+    worker =
+      register(hub, %{
+        role: "worker",
+        ring_token: pm.ring_token,
+        project: "hiko",
+        name: "hiko / w-1"
+      })
+
+    assert {:error, _} = Hub.list_nodes(auth(worker, %{project: "\n"}), hub)
+    assert {:ok, _} = send_message(hub, pm, %{to: [worker.node_id], message: "Task"})
+    Agent.update(clock, fn _ -> 1000 end)
+    assert {:ok, %{nodes: [], messages: [event]}} = Hub.snapshot(hub)
+    assert event.project == "hiko"
+    assert event.from_name == "hiko / pm"
+    assert event.to_names == %{worker.node_id => "hiko / w-1"}
+  end
+
   test "a joining agent needs a valid invitation and cannot choose its own ID", %{
     hub: hub,
     pm: pm

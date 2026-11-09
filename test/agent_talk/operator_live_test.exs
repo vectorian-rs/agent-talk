@@ -16,11 +16,14 @@ defmodule AgentTalk.OperatorLiveTest do
     assert html =~ "Agent messages"
     assert has_element?(view, "#empty-messages")
     assert has_element?(view, "#empty-agents")
-    pm = register(%{role: "pm"})
-    first = join(pm)
-    second = join(pm)
+    assert has_element?(view, "#ring-select[disabled]")
+    pm = register(%{role: "pm", project: "hiko", name: "hiko / pm"})
+    first = join(pm, "hiko / w-1")
+    second = join(pm, "hiko / w-2")
     assert has_element?(view, "#agent-count", "3")
-    assert has_element?(view, "#agent-#{first.node_id} .agent-role", "Worker · #{pm.ring_id}")
+    assert has_element?(view, "#agent-#{first.node_id} .agent-name", "hiko / w-1")
+    assert has_element?(view, "#agent-#{first.node_id} .agent-role", "Worker · #{first.node_id}")
+    assert has_element?(view, "#ring-select option[value='#{pm.ring_id}']", "hiko")
 
     assert has_element?(
              view,
@@ -34,6 +37,8 @@ defmodule AgentTalk.OperatorLiveTest do
              )
 
     assert has_element?(view, "#message-#{id}", "Build the operator view")
+    assert has_element?(view, "#message-#{id} .party-name", "hiko / pm")
+    assert has_element?(view, "#message-#{id} .recipient-name", "hiko / w-1")
     assert has_element?(view, "#message-#{id} .message-kind", pm.ring_id)
     assert has_element?(view, "#message-#{id} .delivery-status", "Queued")
     assert has_element?(view, "#agent-#{first.node_id} .agent-pending", "1 in inbox")
@@ -76,16 +81,42 @@ defmodule AgentTalk.OperatorLiveTest do
     assert has_element?(view, "#no-matches")
   end
 
-  test "operator sees multiple rings and escapes agent supplied HTML" do
-    pm = register(%{role: "pm"})
-    worker = join(pm)
-    other_pm = register(%{role: "pm"})
+  test "ring selection scopes agents and messages and stays selected on live updates" do
+    pm = register(%{role: "pm", project: "hiko", name: "hiko / pm"})
+    worker = join(pm, "hiko / w-1")
+    other_pm = register(%{role: "pm", project: "celeratax", name: "celeratax / pm"})
+    other_worker = join(other_pm, "celeratax / w-1")
     send_message(pm, worker.node_id, "<script>window.agentInjected = true</script>")
+    send_message(other_pm, other_worker.node_id, "Tax task")
     {:ok, view, _} = live(build_conn(), "/")
-    assert has_element?(view, "#agent-#{pm.node_id}", pm.ring_id)
-    assert has_element?(view, "#agent-#{other_pm.node_id}", other_pm.ring_id)
+    assert has_element?(view, "#ring-select option[value='#{pm.ring_id}']", "hiko")
+    assert has_element?(view, "#ring-select option[value='#{other_pm.ring_id}']", "celeratax")
+    assert has_element?(view, "#agent-#{other_pm.node_id}", "celeratax / pm")
+    refute has_element?(view, "#agent-#{pm.node_id}")
+    assert has_element?(view, "#agent-count", "2")
+    assert has_element?(view, "#message-stream", "Tax task")
+
+    view |> form("#ring-selector", %{ring: pm.ring_id}) |> render_change()
+    assert has_element?(view, "#agent-#{pm.node_id}", "hiko / pm")
+    refute has_element?(view, "#agent-#{other_pm.node_id}")
+    refute has_element?(view, "#message-stream", "Tax task")
     assert render(view) =~ "&lt;script&gt;"
     refute has_element?(view, "#message-stream script")
+    send_message(other_pm, other_worker.node_id, "Unselected ring update")
+    assert has_element?(view, "#ring-select option[selected][value='#{pm.ring_id}']")
+    refute has_element?(view, "#message-stream", "Unselected ring update")
+    assert has_element?(view, "#message-count", "1")
+
+    view
+    |> form("#message-filters", %{party: worker.node_id, query: "no-match"})
+    |> render_change()
+
+    assert has_element?(view, "#no-matches")
+    view |> form("#ring-selector", %{ring: other_pm.ring_id}) |> render_change()
+    assert has_element?(view, "#message-stream", "Tax task")
+    assert has_element?(view, "#message-stream", "Unselected ring update")
+    assert has_element?(view, "#message-count", "2")
+    refute has_element?(view, "#agent-#{pm.node_id}")
   end
 
   defp reset_hub do
@@ -99,7 +130,9 @@ defmodule AgentTalk.OperatorLiveTest do
     node
   end
 
-  defp join(pm), do: register(%{role: "worker", ring_token: pm.ring_token})
+  defp join(pm, name \\ nil),
+    do: register(%{role: "worker", ring_token: pm.ring_token, project: pm.project, name: name})
+
   defp auth(node, fields), do: Map.merge(%{node_id: node.node_id, token: node.token}, fields)
 
   defp send_message(from, recipient, message),

@@ -1,6 +1,7 @@
 defmodule AgentTalk.Hub do
   @moduledoc "Serializes ring membership and fan-out into ephemeral, per-agent mailboxes."
   use GenServer
+  alias AgentTalk.MembershipStore
 
   def start_link(opts) do
     GenServer.start_link(__MODULE__, opts, name: Keyword.get(opts, :name, __MODULE__))
@@ -17,39 +18,78 @@ defmodule AgentTalk.Hub do
   def init(opts) do
     Process.send_after(self(), :sweep, 1000)
 
-    {:ok,
-     %{
-       nodes: %{},
-       rings: %{},
-       messages: [],
-       pubsub: Keyword.get(opts, :pubsub),
-       ttl_ms:
-         Keyword.get_lazy(opts, :ttl_ms, fn ->
-           Application.fetch_env!(:agent_talk, :node_ttl_ms)
-         end),
-       history_limit:
-         Keyword.get_lazy(opts, :history_limit, fn ->
-           Application.fetch_env!(:agent_talk, :message_history_limit)
-         end),
-       max_inbox: Keyword.get(opts, :max_inbox, 1000),
-       clock: Keyword.get(opts, :clock, fn -> System.monotonic_time(:millisecond) end)
-     }}
+    state =
+      %{
+        nodes: %{},
+        rings: %{},
+        next_id: 0,
+        messages: [],
+        membership_file: Keyword.get(opts, :membership_file),
+        pubsub: Keyword.get(opts, :pubsub),
+        ttl_ms:
+          Keyword.get_lazy(opts, :ttl_ms, fn ->
+            Application.fetch_env!(:agent_talk, :node_ttl_ms)
+          end),
+        history_limit:
+          Keyword.get_lazy(opts, :history_limit, fn ->
+            Application.fetch_env!(:agent_talk, :message_history_limit)
+          end),
+        max_inbox: Keyword.get(opts, :max_inbox, 1000),
+        clock: Keyword.get(opts, :clock, fn -> System.monotonic_time(:millisecond) end),
+        wall_clock: Keyword.get(opts, :wall_clock, fn -> System.system_time(:millisecond) end)
+      }
+
+    with {:ok, saved} <- MembershipStore.load(state.membership_file) do
+      now = state.clock.()
+      wall_now = state.wall_clock.()
+
+      nodes =
+        Map.new(saved.nodes, fn {id, node} ->
+          {:ok, last_seen, _offset} = DateTime.from_iso8601(node.last_seen)
+          elapsed = max(0, wall_now - DateTime.to_unix(last_seen, :millisecond))
+          {id, Map.merge(node, %{inbox: :queue.new(), seen_at: now - elapsed})}
+        end)
+
+      restored = state |> Map.merge(%{saved | nodes: nodes}) |> expire_nodes(now)
+
+      case MembershipStore.save(state.membership_file, restored) do
+        :ok -> {:ok, restored}
+        {:error, _} -> {:stop, :membership_storage_unavailable}
+      end
+    else
+      {:error, _} -> {:stop, :membership_storage_unavailable}
+    end
   end
 
   @impl true
   def handle_call(request, _from, state) do
     now = state.clock.()
     {reply, updated} = dispatch(request, expire_nodes(state, now), now)
-    notify_if_changed(state, updated)
-    {:reply, reply, updated}
+
+    case persist(state, updated) do
+      :ok ->
+        notify_if_changed(state, updated)
+        {:reply, reply, updated}
+
+      {:error, _} ->
+        {:reply, {:error, "membership storage unavailable; check the server's membership_file"},
+         state}
+    end
   end
 
   @impl true
   def handle_info(:sweep, state) do
     updated = expire_nodes(state, state.clock.())
-    notify_if_changed(state, updated)
     Process.send_after(self(), :sweep, 1000)
-    {:noreply, updated}
+
+    case persist(state, updated) do
+      :ok ->
+        notify_if_changed(state, updated)
+        {:noreply, updated}
+
+      {:error, _} ->
+        {:noreply, state}
+    end
   end
 
   defp dispatch(:snapshot, state, _now) do
@@ -73,6 +113,11 @@ defmodule AgentTalk.Hub do
 
       role == "all" ->
         {{:error, "role all is reserved for broadcasts"}, state}
+
+      not valid_labels?(args) ->
+        {{:error,
+          "project and name must be nonempty labels of at most 128 characters without control characters"},
+         state}
 
       id == nil and token == nil ->
         join_ring(args, state, now)
@@ -101,7 +146,11 @@ defmodule AgentTalk.Hub do
                 {{:error, "ring_token does not match this node's ring"}, state}
 
               true ->
-                node = %{node | seen_at: now, last_seen: timestamp()}
+                node =
+                  node
+                  |> Map.merge(Map.take(args, [:project, :name]))
+                  |> Map.merge(%{seen_at: now, last_seen: timestamp(state)})
+
                 updated = put_in(state.nodes[id], node)
                 {{:ok, registration(node, updated)}, updated}
             end
@@ -113,22 +162,35 @@ defmodule AgentTalk.Hub do
     with {:ok, caller, updated} <- authenticate(args, state, now) do
       role = Map.get(args, :role)
 
-      if role == nil or valid_id?(role) do
-        nodes =
-          ring_nodes(updated, caller.ring_id)
-          |> public_nodes()
-          |> Enum.filter(&(role == nil or &1.role == role))
+      cond do
+        not valid_labels?(args) ->
+          {{:error,
+            "project and name must be nonempty labels of at most 128 characters without control characters"},
+           updated}
 
-        next_message_id =
-          case :queue.peek(caller.inbox) do
-            {:value, message} -> message.id
-            :empty -> nil
-          end
+        role != nil and not valid_id?(role) ->
+          {{:error, "invalid role filter"}, updated}
 
-        inbox = %{pending_messages: :queue.len(caller.inbox), next_message_id: next_message_id}
-        {{:ok, %{ring_id: caller.ring_id, nodes: nodes, inbox: inbox}}, updated}
-      else
-        {{:error, "invalid role filter"}, updated}
+        true ->
+          updated =
+            update_in(
+              updated.nodes[caller.node_id],
+              &Map.merge(&1, Map.take(args, [:project, :name]))
+            )
+
+          nodes =
+            ring_nodes(updated, caller.ring_id)
+            |> public_nodes()
+            |> Enum.filter(&(role == nil or &1.role == role))
+
+          next_message_id =
+            case :queue.peek(caller.inbox) do
+              {:value, message} -> message.id
+              :empty -> nil
+            end
+
+          inbox = %{pending_messages: :queue.len(caller.inbox), next_message_id: next_message_id}
+          {{:ok, %{ring_id: caller.ring_id, nodes: nodes, inbox: inbox}}, updated}
       end
     else
       {:error, _} = error -> {error, state}
@@ -145,30 +207,34 @@ defmodule AgentTalk.Hub do
   defp join_ring(args, state, now) do
     case {args.role, Map.get(args, :ring_token)} do
       {"pm", nil} ->
-        ring_id = unique_id("ring")
+        {ring_id, state} = allocate_id("ring", state)
         state = put_in(state.rings[ring_id], new_token())
-        add_node(args.role, ring_id, state, now)
+        add_node(args, ring_id, state, now)
 
       {_role, nil} ->
         {{:error, "ring_token is required; ask the PM for an onboarding prompt"}, state}
 
-      {role, ring_token} ->
+      {_role, ring_token} ->
         case Enum.find(state.rings, fn {_id, token} -> token == ring_token end) do
-          {ring_id, _token} -> add_node(role, ring_id, state, now)
+          {ring_id, _token} -> add_node(args, ring_id, state, now)
           nil -> {{:error, "invalid ring token"}, state}
         end
     end
   end
 
-  defp add_node(role, ring_id, state, now) do
+  defp add_node(args, ring_id, state, now) do
+    {node_id, state} = allocate_id("node", state)
+
     node = %{
-      node_id: unique_id("node"),
-      role: role,
+      node_id: node_id,
+      role: args.role,
+      project: Map.get(args, :project),
+      name: Map.get(args, :name),
       ring_id: ring_id,
       token: new_token(),
       inbox: :queue.new(),
       seen_at: now,
-      last_seen: timestamp()
+      last_seen: timestamp(state)
     }
 
     updated = put_in(state.nodes[node.node_id], node)
@@ -214,7 +280,7 @@ defmodule AgentTalk.Hub do
       node ->
         if Map.get(args, :token) == node.token do
           updated =
-            put_in(state.nodes[node.node_id], %{node | seen_at: now, last_seen: timestamp()})
+            put_in(state.nodes[node.node_id], %{node | seen_at: now, last_seen: timestamp(state)})
 
           {:ok, node, updated}
         else
@@ -249,12 +315,14 @@ defmodule AgentTalk.Hub do
     with :ok <- validate_message(Map.get(args, :message)),
          {:ok, recipients} <- recipients(args, ring_nodes(state, node.ring_id), node.node_id),
          :ok <- check_capacity(recipients, state) do
+      {message_id, state} = allocate_id("message", state)
+
       message = %{
-        id: unique_id("message"),
+        id: message_id,
         from: node.node_id,
         ring_id: node.ring_id,
         message: args.message,
-        sent_at: timestamp()
+        sent_at: timestamp(state)
       }
 
       nodes =
@@ -262,7 +330,16 @@ defmodule AgentTalk.Hub do
           update_in(nodes[id].inbox, &:queue.in(message, &1))
         end)
 
-      event = Map.merge(message, %{to: recipients, from_role: node.role, received_by: []})
+      event =
+        Map.merge(message, %{
+          to: recipients,
+          from_role: node.role,
+          from_name: node_name(node),
+          to_names: Map.new(recipients, &{&1, node_name(state.nodes[&1])}),
+          project: Map.get(node, :project),
+          received_by: []
+        })
+
       history = Enum.take([event | state.messages], state.history_limit)
 
       {{:ok, %{message_id: message.id, delivered_to: recipients}},
@@ -320,13 +397,49 @@ defmodule AgentTalk.Hub do
   defp validate_message(_), do: {:error, "message is required when sending"}
 
   defp valid_id?(id), do: is_binary(id) and Regex.match?(~r/\A[a-zA-Z0-9_.-]{1,64}\z/, id)
-  defp unique_id(prefix), do: "#{prefix}-#{System.unique_integer([:positive, :monotonic])}"
+
+  defp valid_labels?(args) do
+    Enum.all?([:project, :name], fn key ->
+      case Map.get(args, key) do
+        nil ->
+          true
+
+        value when is_binary(value) ->
+          String.trim(value) != "" and String.length(value) <= 128 and
+            not Regex.match?(~r/[[:cntrl:]]/, value)
+
+        _ ->
+          false
+      end
+    end)
+  end
+
+  defp node_name(node), do: Map.get(node, :name) || node.node_id
+
+  defp allocate_id(prefix, state) do
+    counter =
+      max(Map.get(state, :next_id, 0) + 1, System.unique_integer([:positive, :monotonic]))
+
+    {"#{prefix}-#{counter}", Map.put(state, :next_id, counter)}
+  end
 
   defp new_token do
     :crypto.hash(:sha256, :crypto.strong_rand_bytes(32)) |> Base.url_encode64(padding: false)
   end
 
-  defp timestamp, do: DateTime.utc_now() |> DateTime.to_iso8601()
+  defp timestamp(state) do
+    wall_clock = Map.get(state, :wall_clock, fn -> System.system_time(:millisecond) end)
+    wall_clock.() |> DateTime.from_unix!(:millisecond) |> DateTime.to_iso8601()
+  end
+
+  defp persist(previous, updated) do
+    if previous.nodes != updated.nodes or previous.rings != updated.rings or
+         Map.get(previous, :next_id) != Map.get(updated, :next_id) do
+      MembershipStore.save(Map.get(updated, :membership_file), updated)
+    else
+      :ok
+    end
+  end
 
   defp ring_nodes(state, ring_id),
     do: Map.filter(state.nodes, fn {_id, node} -> node.ring_id == ring_id end)
@@ -352,6 +465,8 @@ defmodule AgentTalk.Hub do
       node_id: node.node_id,
       role: node.role,
       ring_id: node.ring_id,
+      name: node_name(node),
+      project: Map.get(node, :project),
       last_seen: node.last_seen,
       pending_messages: :queue.len(node.inbox)
     }

@@ -16,16 +16,22 @@ export async function readMembership(file) {
     if (error.code === "ENOENT") return null;
     throw new ClientError("configuration", "Cannot read the saved AgentTalk registration.");
   }
-  if (!value || !["node_id", "token", "ring_id", "role"].every((key) =>
-    typeof value[key] === "string" && value[key].length > 0)) {
-    throw new ClientError("configuration", "Save the complete AgentTalk registration as JSON.");
+  // Pi's tools return the MCP envelope; other clients expose its registration.
+  const member = value && Object.hasOwn(value, "structuredContent") ? value.structuredContent : value;
+  if (value?.isError === true || !member || !["node_id", "token", "ring_id", "role"].every((key) =>
+    typeof member[key] === "string" && member[key].length > 0)) {
+    throw new ClientError("configuration",
+      "Save the successful register_node result or its structuredContent object as JSON.");
   }
-  return value;
+  return member;
 }
 
 export class McpClient {
   constructor(url, { fetch: fetchImpl = globalThis.fetch } = {}) {
-    const parsed = new URL(url);
+    let parsed;
+    try { parsed = new URL(url); } catch {
+      throw new ClientError("configuration", "Use an HTTP(S) MCP URL without embedded credentials.");
+    }
     if (!["http:", "https:"].includes(parsed.protocol) || parsed.username || parsed.password) {
       throw new ClientError("configuration", "Use an HTTP(S) MCP URL without embedded credentials.");
     }

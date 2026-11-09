@@ -1,3 +1,4 @@
 port = 4000
 node_ttl_seconds = 86400
 message_history_limit = 50
+membership_file = "../data/memberships.json"

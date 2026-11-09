@@ -29,6 +29,7 @@ agent_talk-*.tar
 !.env.sample
 /config/*.secret.exs
 /.agent-talk/
+/data/
 
 # Editor caches and macOS metadata.
 /.elixir_ls/

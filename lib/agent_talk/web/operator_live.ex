@@ -6,7 +6,7 @@ defmodule AgentTalk.Web.OperatorLive do
   @impl true
   def mount(_params, _session, socket) do
     if connected?(socket), do: Phoenix.PubSub.subscribe(AgentTalk.PubSub, Hub.topic())
-    {:ok, socket |> assign(party: "all", query: "") |> refresh()}
+    {:ok, socket |> assign(party: "all", query: "", ring: nil) |> refresh()}
   end
 
   @impl true
@@ -17,21 +17,84 @@ defmodule AgentTalk.Web.OperatorLive do
     {:noreply, socket |> assign(party: party, query: query) |> filter_messages()}
   end
 
+  def handle_event("select_ring", %{"ring" => ring}, socket) do
+    if Enum.any?(socket.assigns.rings, &(&1.id == ring)) do
+      {:noreply, socket |> assign(ring: ring, party: "all", query: "") |> scope_ring()}
+    else
+      {:noreply, socket}
+    end
+  end
+
   defp refresh(socket) do
     {:ok, snapshot} = Hub.snapshot()
+    rings = ring_options(snapshot)
+    previous = socket.assigns[:ring]
 
-    parties =
-      (Enum.map(snapshot.nodes, & &1.node_id) ++
-         Enum.flat_map(snapshot.messages, &[&1.from | &1.to]))
-      |> Enum.uniq()
-      |> Enum.sort()
+    ring =
+      if Enum.any?(rings, &(&1.id == previous)) do
+        previous
+      else
+        case List.first(rings) do
+          nil -> nil
+          first -> first.id
+        end
+      end
 
     socket
     |> assign(
-      nodes: snapshot.nodes,
-      messages: snapshot.messages,
-      history_limit: snapshot.history_limit,
-      parties: parties
+      snapshot: snapshot,
+      rings: rings,
+      ring: ring,
+      history_limit: snapshot.history_limit
+    )
+    |> scope_ring()
+  end
+
+  defp ring_options(snapshot) do
+    (Enum.map(snapshot.nodes, & &1.ring_id) ++ Enum.map(snapshot.messages, & &1.ring_id))
+    |> Enum.uniq()
+    |> Enum.map(fn id ->
+      nodes =
+        snapshot.nodes |> Enum.filter(&(&1.ring_id == id)) |> Enum.sort_by(&(&1.role != "pm"))
+
+      project =
+        Enum.find_value(nodes, &Map.get(&1, :project)) ||
+          Enum.find_value(snapshot.messages, fn event ->
+            if event.ring_id == id, do: Map.get(event, :project)
+          end)
+
+      %{id: id, label: if(project, do: "#{project} · #{id}", else: id)}
+    end)
+    |> Enum.sort_by(& &1.label)
+  end
+
+  defp scope_ring(socket) do
+    snapshot = socket.assigns.snapshot
+    ring = socket.assigns.ring
+
+    nodes =
+      snapshot.nodes
+      |> Enum.filter(&(&1.ring_id == ring))
+      |> Enum.sort_by(&{&1.role != "pm", Map.get(&1, :name) || &1.node_id, &1.node_id})
+
+    messages = Enum.filter(snapshot.messages, &(&1.ring_id == ring))
+
+    labels =
+      messages
+      |> Enum.reverse()
+      |> Enum.reduce(%{}, fn event, labels ->
+        labels
+        |> Map.put(event.from, Map.get(event, :from_name, event.from))
+        |> Map.merge(Map.get(event, :to_names, %{}))
+      end)
+      |> Map.merge(Map.new(nodes, &{&1.node_id, Map.get(&1, :name) || &1.node_id}))
+
+    socket
+    |> assign(
+      nodes: nodes,
+      messages: messages,
+      labels: labels,
+      parties: Enum.sort_by(Map.keys(labels), &{labels[&1], &1})
     )
     |> filter_messages()
   end
@@ -45,7 +108,13 @@ defmodule AgentTalk.Web.OperatorLive do
         (party == "all" or event.from == party or party in event.to) and
           (query == "" or
              String.contains?(
-               String.downcase(Enum.join([event.from, event.message | event.to], " ")),
+               String.downcase(
+                 event.message <>
+                   " " <>
+                   Enum.map_join([event.from | event.to], " ", fn id ->
+                     id <> " " <> Map.get(socket.assigns.labels, id, id)
+                   end)
+               ),
                query
              ))
       end)
@@ -110,6 +179,13 @@ defmodule AgentTalk.Web.OperatorLive do
 
         <div class="console-grid">
           <aside class="agents-panel" aria-labelledby="agents-title">
+            <form id="ring-selector" phx-change="select_ring" class="ring-selector">
+              <label for="ring-select" class="small-label">Ring</label>
+              <select id="ring-select" name="ring" disabled={@rings == []}>
+                <option :if={@rings == []} value="">No rings</option>
+                <option :for={ring <- @rings} value={ring.id} selected={@ring == ring.id}>{ring.label}</option>
+              </select>
+            </form>
             <div class="panel-heading">
               <h2 id="agents-title">Registered agents</h2><span class="count-label">{length(@nodes)}</span>
             </div>
@@ -124,8 +200,8 @@ defmodule AgentTalk.Web.OperatorLive do
                   {String.upcase(String.first(node.role))}
                 </span>
                 <div class="agent-details">
-                  <p class="agent-name">{node.node_id}</p>
-                  <p class="agent-role">{role_name(node.role)} · {node.ring_id}</p>
+                  <p class="agent-name">{node.name}</p>
+                  <p class="agent-role">{role_name(node.role)} · {node.node_id}</p>
                   <p class="agent-pending">{node.pending_messages} in inbox</p>
                   <p class="agent-activity">
                     Last activity <time datetime={node.last_seen} title={node.last_seen}>{clock(node.last_seen)} UTC</time>
@@ -155,7 +231,7 @@ defmodule AgentTalk.Web.OperatorLive do
                 <span class="sr-only">Filter by agent</span>
                 <select name="party" aria-label="Filter by agent">
                   <option value="all" selected={@party == "all"}>All agents</option>
-                  <option :for={party <- Enum.uniq([@party | @parties]) |> Enum.reject(&(&1 == "all"))} value={party} selected={@party == party}>{party}</option>
+                  <option :for={party <- Enum.uniq([@party | @parties]) |> Enum.reject(&(&1 == "all"))} value={party} selected={@party == party}>{Map.get(@labels, party, party)}</option>
                 </select>
               </label>
             </form>
@@ -173,9 +249,9 @@ defmodule AgentTalk.Web.OperatorLive do
               <li :for={event <- @visible_messages} id={"message-#{event.id}"} class="message-item">
                 <div class="message-meta">
                   <div class="message-route">
-                    <span class={["party-name", event.from_role == "pm" && "party-pm"]}>{event.from}</span>
+                    <span class={["party-name", event.from_role == "pm" && "party-pm"]} title={event.from}>{Map.get(@labels, event.from, event.from)}</span>
                     <span class="route-arrow" aria-label="to">→</span>
-                    <span class="recipient-list"><span :for={recipient <- event.to} class="recipient-name">{recipient}</span></span>
+                    <span class="recipient-list"><span :for={recipient <- event.to} class="recipient-name" title={recipient}>{Map.get(@labels, recipient, recipient)}</span></span>
                   </div>
                   <time datetime={event.sent_at}>{clock(event.sent_at)}</time>
                 </div>
@@ -191,7 +267,7 @@ defmodule AgentTalk.Web.OperatorLive do
             <p :if={@messages != []} class="stream-end">Showing {length(@visible_messages)} of {length(@messages)} retained messages.</p>
           </section>
         </div>
-        <footer class="operator-footer"><span>AgentTalk</span><span>Log: memory only · limit: {@history_limit}</span></footer>
+        <footer class="operator-footer"><span>AgentTalk</span><span>Shared log: memory only · limit: {@history_limit}</span></footer>
       </main>
     </div>
     """

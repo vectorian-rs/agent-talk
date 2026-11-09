@@ -8,6 +8,8 @@ provide their role instructions.
 
 A **node** is one registered agent; a **ring** is a PM and its invited team.
 The server assigns IDs. Labels such as `w-1` identify workers in your project.
+Pi displays the checkout name and membership filename, such as `hiko / w-1`.
+Use the left-hand ring selector to watch one team's agents and messages.
 
 | Client | Message pickup |
 | --- | --- |
@@ -158,35 +160,34 @@ host checks and does not prove the model is working.
 ## Daily use and recovery
 
 Reuse saved files to resume; use fresh files for a new team. Never share one
-membership between live agents or fork the PM to create workers. After a server
-restart, move old files aside privately and repeat steps 3–4. Recover unfinished
-work from the project record.
+membership between live agents or fork the PM to create workers. Server restarts
+preserve rings and registrations; leave agents running and Pi reconnects
+automatically. Lease time includes downtime. Recover unfinished work from the
+project record because queued messages and UI history remain in memory.
+Rings already lost by an older server must be recreated once.
 
 Pi controls: `/agent-talk status`, `/agent-talk off`, and
-`/agent-talk on .agent-talk/w-1.json` (use your session's file). Escape/cancellation
-pauses automatic wake-ups; `on` resumes them.
+`/agent-talk on .agent-talk/w-1.json` (use your session's file). Enter one command
+at a time. Paths must end in `.json`. Status shows the path, last successful
+check and last requested turn. Escape pauses automatic turns while heartbeats
+continue; your next prompt or `on` resumes them. Only `off` persists a disable.
 
 | Problem | Action |
 | --- | --- |
-| Old tool schema | `/mcp reconnect agent-talk`; `/reload` after external MCP config changes. |
+| Old tool schema | `/mcp reconnect agent-talk`; `/reload` after MCP config or extension updates. |
 | Unread mail | Check the extension, matching credential path and notification-handling prompt. Three wake-ups for the same unread message produce a stalled status. |
 | Lost connection | The host retries with backoff without model turns. |
 | Expired registration | Rejoin with saved role/ring invitation, save the new identity, rediscover and notify peers, then reconcile work. |
 | `invalid node token` | Reload credentials; if lost, rejoin as a new identity. Another node's token cannot be reclaimed. |
-| `invalid ring token` | Get the current invitation from the operator; server restarts invalidate rings. |
+| `invalid ring token` | Check the server and its membership file. A lost/deleted store needs a new PM ring and worker invitations; client files cannot restore it. |
 | Unknown/expired recipient | Rediscover and confirm its identity before resending. Rejected sends queue nothing. |
-
-Known issues still open:
-
-- Keep the default 24-hour lease: leases of 10 seconds or less can expire between
-  watcher checks, including initial registration-file discovery.
-- After conversation-branch navigation, reload and reopening Pi can restore
-  different monitoring states. Check `/agent-talk status` and select `on` or `off`.
 
 ## Membership file examples
 
 Agents save complete `register_node` responses. Files need not exist at launch.
-Below, credentials are placeholders and server instruction text is abbreviated.
+Pi wraps the registration in `structuredContent`, alongside `content` and `isError`.
+The extension accepts that result or the registration object shown below.
+Credentials are placeholders; server instruction text is abbreviated.
 
 `.agent-talk/pm.json`:
 
@@ -234,11 +235,20 @@ Development defaults to `config/dev.toml`; production builds to `config/prod.tom
 port = 4000
 node_ttl_seconds = 86400
 message_history_limit = 50
+membership_file = "../data/memberships.json"
 ```
 
 Select with `--config`. Choosing `prod.toml` does not change the build mode.
 Numeric settings must be positive integers; ports are 1..65535. Invalid or unknown
-settings stop startup. The startup log reports version, config, lease and history limit.
+settings stop startup. The startup log reports version, config, lease, history
+limit and membership file.
+
+`membership_file` resolves relative to the TOML file. The default private
+`data/memberships.json` stores rings, credentials, labels, lease activity and the
+ID counter, using atomic replacements with mode `0600`. Keep it across restarts,
+back it up privately and use a separate file for each server. An unreadable or
+corrupt store stops startup; failed writes reject the operation. The default
+directory is gitignored. Changing this path selects different membership state.
 
 For another port, update the MCP URL and add
 `--agent-talk-url http://127.0.0.1:<port>/mcp` to each Pi launch.
@@ -248,7 +258,7 @@ localhost/127.0.0.1 at that port; `allowed_origins` overrides them. Requests wit
 `Origin` are accepted. The UI secret is generated at startup. Remote access needs
 authenticated HTTPS and an appropriate origin allowlist.
 
-- Rings, credentials, inboxes and history are in memory; coordinate restarts.
+- Rings and unexpired registrations survive restarts. Inboxes and UI history do not.
 - Expiry discards inboxes. Receive removes mail before the response, so failures
   can lose it. Keep durable tasks/results in your project's record.
 - Each inbox holds 1,000 messages; messages are at most 65,536 UTF-8 bytes.
@@ -259,8 +269,8 @@ authenticated HTTPS and an appropriate origin allowlist.
 
 | Tool | Arguments |
 | --- | --- |
-| `register_node` | Create: `{"role":"pm"}`. Join: `{"role":"worker","ring_token":"<INVITATION>"}`. Renew: `{"role":"worker","node_id":"<ID>","token":"<PRIVATE_TOKEN>"}`. |
-| `list_nodes` | Own `node_id`/`token` and optional `role` filter. Returns active ring members and the caller's `inbox` metadata without consuming mail. |
+| `register_node` | Create: `{"role":"pm"}`. Join: `{"role":"worker","ring_token":"<INVITATION>"}`. Renew: `{"role":"worker","node_id":"<ID>","token":"<PRIVATE_TOKEN>"}`. Optional `project` and `name` supply display labels. |
+| `list_nodes` | Own `node_id`/`token` and optional `role` filter. Returns active ring members and the caller's `inbox` metadata without consuming mail. Optional `project` and `name` update only the caller's labels. |
 | `communicate` | Own `node_id`/`token` and `action`. Send: `message` and either `to: ["<ID>", ...]` or `to_role`. Receive: no send fields; drains the FIFO inbox. |
 
 Clients wrap these arguments in `tools/call`. Broadcasts exclude the sender;
@@ -270,13 +280,14 @@ inside the ring. Invalid recipients or full inboxes reject the entire fan-out.
 Save every complete registration via a same-directory temporary file, mode `0600`,
 then rename over the previous file. Roles use 1..64 letters, digits, underscores,
 dots or hyphens; `all` is reserved. Roles confer no authorization or human approval.
-IDs are never reused within the running Erlang VM, including after node expiry
-or Hub restart. Tokens hash 32 random bytes with SHA-256.
+The saved ID counter prevents reuse across restarts, including after expiry.
+Tokens hash 32 random bytes with SHA-256.
 
 Authenticated discovery, communication and renewal refresh only the caller's
 lease, even if discovery/communication later fail validation. Incoming mail and
 open connections do not. Renewal preserves ID, tokens, ring and inbox, and cannot
-change role/ring. Invitations survive member expiry until the server restarts.
+change role/ring. Invitations survive member expiry and server restarts while
+the membership file is retained.
 A fresh role-only PM call creates another ring.
 
 `inbox` contains `pending_messages` and `next_message_id` (null when empty), even
@@ -292,7 +303,7 @@ These developer checks are not required to onboard a real team:
 | --- | --- |
 | `examples/demo.exs` | Scripted PM/two-worker exchange, isolated by default. `--url http://127.0.0.1:4000` uses a separate demo ring on an existing server. |
 | `examples/lease_smoke.exs` | Isolated short-lease registration, renewal, expiry, rejoining, delivery and ring-isolation checks. |
-| `examples/pi_smoke.exs` | Three real Pi processes with a scripted local model; automatic pickup/replies, no paid model calls or trial-server access. |
+| `examples/pi_smoke.exs` | Three real Pi processes exchange messages before and after an isolated server process restart, using unchanged credentials; no paid model calls or trial-server access. |
 
 From the AgentTalk checkout:
 
