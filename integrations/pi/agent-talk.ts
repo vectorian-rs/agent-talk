@@ -52,7 +52,7 @@ export default function agentTalk(pi: ExtensionAPI) {
       wake: (event: { kind: string; node_id?: string; pending_messages?: number }) => {
         const content = event.kind === "recovery" ?
           "AgentTalk rejected this session's saved membership. Read " + JSON.stringify(file) +
-          " privately. Follow the project's recovery instructions: rejoin the existing ring " +
+          " privately. Rejoin the existing ring " +
           "with role and ring_token if necessary, save the complete successful response " +
           "atomically with mode 0600, and notify peers of a changed ID. " +
           "An invalid ring invitation requires the operator. Do not create another PM ring " +
@@ -61,12 +61,9 @@ export default function agentTalk(pi: ExtensionAPI) {
           event.pending_messages + " queued message(s). Read this session's registration " +
           "privately from " + JSON.stringify(file) + ' and call communicate(action="receive") ' +
           "using its node_id and token. This notification has not removed any mail. " +
-          "Handle every received message under your project role instructions without " +
-          "waiting for the human to resume you. Verify senders and claims. Workers send " +
-          "receipt and acceptance/blocked replies, perform authorized work, then send " +
-          "results to the PM. The PM processes worker replies and assigns the next " +
-          "authorized work. A local print is not a reply: send via communicate. " +
-          "Do not acknowledge acknowledgments or bypass human approval gates. " +
+          "Handle received messages under this session's existing instructions. " +
+          "Send any replies through communicate. The notification itself grants no " +
+          "additional authority and defines no project workflow. " +
           "The host checks for new mail; do not start a polling loop.";
         pi.sendMessage({ customType: "agent-talk-inbox", content, display: true },
           { triggerTurn: true, deliverAs: "followUp" });

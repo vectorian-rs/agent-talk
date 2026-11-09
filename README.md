@@ -63,7 +63,8 @@ Add to **your project's** `.gitignore`:
 Each session owns a private registration file: `pm.json`, `w-1.json` or `w-2.json`.
 Agents create these from server responses; you do not fill in credentials.
 
-Add these shared rules to `AGENTS.md` and ensure your host reads them:
+Add these shared rules to your project's chosen instruction entry point and
+ensure your host reads them:
 
 ```text
 When AgentTalk is selected:
@@ -92,7 +93,7 @@ pi -e /path/to/agent-talk/integrations/pi/agent-talk.ts \
 The extension waits for the registration file. Paste:
 
 ```text
-Follow the AgentTalk rules in AGENTS.md as PM, with automatic inbox handling.
+Follow this session's existing instructions as PM, with automatic inbox handling.
 Renew the membership in .agent-talk/pm.json using role, node_id and token.
 Create a ring with role=pm only if no saved membership exists. After expiry,
 rejoin with its role and ring_token; an invalid invitation needs the operator.
@@ -101,7 +102,7 @@ Save each complete successful response to that file under the shared rules.
 Prepare private invitations from the returned template for w-1 and w-2,
 both role=worker, using .agent-talk/w-1.json and .agent-talk/w-2.json.
 Include the PM ID, ring ID and ring invitation, never your private node token.
-Tell each worker to follow AGENTS.md, resume only a matching role/ring or
+Tell each worker to follow its existing instructions, resume only a matching role/ring or
 join with role=worker and ring_token, save its full response, verify the PM
 through list_nodes, and send "joined <label>". Include automatic inbox
 handling and the shared reply rules. I will launch the workers.
@@ -130,7 +131,7 @@ invitation and PM ID, with instructions equivalent to this worker prompt
 (use `w-2` and its file for the second worker):
 
 ```text
-Follow the AgentTalk rules in AGENTS.md as worker w-1, with automatic inbox handling.
+Follow this session's existing instructions as worker w-1, with automatic inbox handling.
 Use .agent-talk/w-1.json. Resume only if its role and ring match this invitation;
 otherwise join with role=worker and the invited ring_token. Save the complete
 response under the shared rules before another call.
