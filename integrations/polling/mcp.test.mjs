@@ -41,6 +41,17 @@ test("initializes Streamable HTTP once and sends session and protocol headers", 
   assert.equal(fake.calls.at(-1).headers["mcp-protocol-version"], "2025-11-25");
 });
 
+test("tool discovery and authenticated calls share one initialized transport", async () => {
+  const fake = transport((body) => body.method === "tools/list" ?
+    Response.json({ id: body.id, result: { tools: [{ name: "register_node" }] } }) :
+    Response.json({ id: body.id, result: { structuredContent: { okay: true } } }));
+  const client = new McpClient("http://127.0.0.1/mcp", fake);
+  assert.deepEqual(await client.listTools(), [{ name: "register_node" }]);
+  await client.call("list_nodes", {});
+  assert.deepEqual(fake.calls.map((call) => call.method),
+    ["initialize", "notifications/initialized", "tools/list", "tools/call"]);
+});
+
 test("reads streamed SSE with split CRLF delimiters and unrelated events", async () => {
   const fake = transport((body) => {
     const data = ': keepalive\r\n\r\ndata: {"method":"notification"}\r\n\r\ndata: ' +

@@ -45,15 +45,7 @@ export class McpClient {
   async call(name, args, signal) {
     for (let attempt = 0; attempt < 2; attempt++) {
       try {
-        if (!this.ready) {
-          const result = await this.request("initialize", {
-            protocolVersion: this.version, capabilities: {},
-            clientInfo: { name: "agent-talk-inbox", version: "1" },
-          }, signal);
-          this.version = result.protocolVersion;
-          await this.request("notifications/initialized", undefined, signal, true);
-          this.ready = true;
-        }
+        await this.connect(signal);
         const result = await this.request("tools/call", { name, arguments: args }, signal);
         if (result.isError) {
           const text = (result.content ?? []).filter((item) => item.type === "text")
@@ -77,6 +69,24 @@ export class McpClient {
         this.session = undefined;
       }
     }
+  }
+
+  async connect(signal) {
+    if (this.ready) return;
+    const result = await this.request("initialize", {
+      protocolVersion: this.version, capabilities: {},
+      clientInfo: { name: "agent-talk-client", version: "1" },
+    }, signal);
+    this.version = result.protocolVersion;
+    await this.request("notifications/initialized", undefined, signal, true);
+    this.ready = true;
+  }
+
+  async listTools(signal) {
+    await this.connect(signal);
+    const result = await this.request("tools/list", {}, signal);
+    if (!Array.isArray(result.tools)) throw new ClientError("protocol", "Invalid MCP tool list.");
+    return result.tools;
   }
 
   async request(method, params, signal, notification = false) {
