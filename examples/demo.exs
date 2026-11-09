@@ -12,6 +12,7 @@ base_url =
     external_url
   else
     Application.put_env(:agent_talk, :http_enabled, false)
+    Application.put_env(:agent_talk, :membership_file, nil)
     {:ok, _} = Application.ensure_all_started(:agent_talk)
 
     {:ok, listener} =

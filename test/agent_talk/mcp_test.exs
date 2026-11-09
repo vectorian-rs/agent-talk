@@ -31,8 +31,11 @@ defmodule AgentTalk.MCPTest do
     refute "ring_token" in schema["required"]
     refute Map.has_key?(schema["properties"]["role"], "enum")
 
-    pm = call(AgentTalk.TestPM, "register_node", %{role: "pm"})
+    pm =
+      call(AgentTalk.TestPM, "register_node", %{role: "pm", project: "hiko", name: "hiko / pm"})
+
     assert pm["onboarding_prompt_template"] =~ "<RING_TOKEN>"
+    assert pm["name"] == "hiko / pm"
 
     workers =
       for name <- [AgentTalk.TestW1, AgentTalk.TestW2] do
@@ -69,13 +72,24 @@ defmodule AgentTalk.MCPTest do
     assert sent["delivered_to"] == ids
 
     for {name, node} <- workers do
-      inbox_status = call(name, "list_nodes", auth(node, %{role: "absent"}))
+      inbox_status =
+        call(
+          name,
+          "list_nodes",
+          auth(node, %{role: "absent", project: "hiko", name: "hiko / worker"})
+        )
+
       assert inbox_status["nodes"] == []
 
       assert inbox_status["inbox"] == %{
                "pending_messages" => 1,
                "next_message_id" => sent["message_id"]
              }
+
+      named = call(name, "list_nodes", auth(node, %{}))
+
+      assert Enum.find(named["nodes"], &(&1["node_id"] == node["node_id"]))["name"] ==
+               "hiko / worker"
 
       received = call(name, "communicate", auth(node, %{action: "receive"}))
       assert Enum.map(received["messages"], & &1["from"]) == [pm["node_id"]]

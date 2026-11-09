@@ -28,6 +28,18 @@ defmodule AgentTalk.Tools.RegisterNode do
     field(:token, :string,
       description: "Your private node token for renewal; never use the shared ring_token here"
     )
+
+    field(:project, :string,
+      min_length: 1,
+      max_length: 128,
+      description: "Repository or project label"
+    )
+
+    field(:name, :string,
+      min_length: 1,
+      max_length: 128,
+      description: "Display name, e.g. hiko / w-1"
+    )
   end
 
   @impl true

@@ -22,6 +22,13 @@ function transport(handler) {
   };
 }
 
+test("invalid MCP URLs fail without echoing credentials", () => {
+  for (const url of ["not a URL test-only-secret", "http://user:test-only-secret@localhost/mcp", "file:///private"]) {
+    assert.throws(() => new McpClient(url), (error) =>
+      error.code === "configuration" && !error.message.includes("test-only-secret"));
+  }
+});
+
 test("initializes Streamable HTTP once and sends session and protocol headers", async () => {
   const fake = transport((body) =>
     Response.json({ id: body.id, result: { structuredContent: { nodes: [] } } }));
@@ -32,6 +39,17 @@ test("initializes Streamable HTTP once and sends session and protocol headers", 
     ["initialize", "notifications/initialized", "tools/call", "tools/call"]);
   assert.equal(fake.calls.at(-1).headers["mcp-session-id"], "transport-session");
   assert.equal(fake.calls.at(-1).headers["mcp-protocol-version"], "2025-11-25");
+});
+
+test("tool discovery and authenticated calls share one initialized transport", async () => {
+  const fake = transport((body) => body.method === "tools/list" ?
+    Response.json({ id: body.id, result: { tools: [{ name: "register_node" }] } }) :
+    Response.json({ id: body.id, result: { structuredContent: { okay: true } } }));
+  const client = new McpClient("http://127.0.0.1/mcp", fake);
+  assert.deepEqual(await client.listTools(), [{ name: "register_node" }]);
+  await client.call("list_nodes", {});
+  assert.deepEqual(fake.calls.map((call) => call.method),
+    ["initialize", "notifications/initialized", "tools/list", "tools/call"]);
 });
 
 test("reads streamed SSE with split CRLF delimiters and unrelated events", async () => {
@@ -84,5 +102,34 @@ test("credentials are read privately, missing files wait, malformed registration
     assert.equal((await readMembership(file)).node_id, "n");
   } finally {
     await rm(directory, { recursive: true });
+  }
+});
+
+test("reads the complete MCP registration result saved by Pi", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "agent-talk-pi-registration-"));
+  const file = join(directory, "worker.json");
+  const member = {
+    node_id: "node-test", ring_id: "ring-test", role: "worker",
+    token: "test-only-private", ring_token: "test-only-invitation",
+    expires_in_seconds: 86400, instructions: "Test instructions",
+  };
+  try {
+    const result = { content: [{ type: "text", text: JSON.stringify(member) }],
+      isError: false, structuredContent: member };
+    await writeFile(file, JSON.stringify(result), { mode: 0o600 });
+    const saved = await readMembership(file);
+    assert.equal(saved.node_id, member.node_id);
+    assert.equal(saved.ring_id, member.ring_id);
+    assert.ok(saved.token === member.token && saved.ring_token === member.ring_token,
+      "Reading the MCP result must preserve registration credentials");
+    assert.equal(saved.instructions, member.instructions);
+
+    await writeFile(file, JSON.stringify({ ...result, isError: true }));
+    await assert.rejects(readMembership(file), (error) => error.code === "configuration" &&
+      !error.message.includes(member.token));
+    await writeFile(file, JSON.stringify({ ...result, structuredContent: null }));
+    await assert.rejects(readMembership(file), (error) => error.code === "configuration");
+  } finally {
+    await rm(directory, { recursive: true, force: true });
   }
 });

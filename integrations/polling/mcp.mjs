@@ -16,16 +16,22 @@ export async function readMembership(file) {
     if (error.code === "ENOENT") return null;
     throw new ClientError("configuration", "Cannot read the saved AgentTalk registration.");
   }
-  if (!value || !["node_id", "token", "ring_id", "role"].every((key) =>
-    typeof value[key] === "string" && value[key].length > 0)) {
-    throw new ClientError("configuration", "Save the complete AgentTalk registration as JSON.");
+  // Pi's tools return the MCP envelope; other clients expose its registration.
+  const member = value && Object.hasOwn(value, "structuredContent") ? value.structuredContent : value;
+  if (value?.isError === true || !member || !["node_id", "token", "ring_id", "role"].every((key) =>
+    typeof member[key] === "string" && member[key].length > 0)) {
+    throw new ClientError("configuration",
+      "Save the successful register_node result or its structuredContent object as JSON.");
   }
-  return value;
+  return member;
 }
 
 export class McpClient {
   constructor(url, { fetch: fetchImpl = globalThis.fetch } = {}) {
-    const parsed = new URL(url);
+    let parsed;
+    try { parsed = new URL(url); } catch {
+      throw new ClientError("configuration", "Use an HTTP(S) MCP URL without embedded credentials.");
+    }
     if (!["http:", "https:"].includes(parsed.protocol) || parsed.username || parsed.password) {
       throw new ClientError("configuration", "Use an HTTP(S) MCP URL without embedded credentials.");
     }
@@ -39,15 +45,7 @@ export class McpClient {
   async call(name, args, signal) {
     for (let attempt = 0; attempt < 2; attempt++) {
       try {
-        if (!this.ready) {
-          const result = await this.request("initialize", {
-            protocolVersion: this.version, capabilities: {},
-            clientInfo: { name: "agent-talk-inbox", version: "1" },
-          }, signal);
-          this.version = result.protocolVersion;
-          await this.request("notifications/initialized", undefined, signal, true);
-          this.ready = true;
-        }
+        await this.connect(signal);
         const result = await this.request("tools/call", { name, arguments: args }, signal);
         if (result.isError) {
           const text = (result.content ?? []).filter((item) => item.type === "text")
@@ -71,6 +69,24 @@ export class McpClient {
         this.session = undefined;
       }
     }
+  }
+
+  async connect(signal) {
+    if (this.ready) return;
+    const result = await this.request("initialize", {
+      protocolVersion: this.version, capabilities: {},
+      clientInfo: { name: "agent-talk-client", version: "1" },
+    }, signal);
+    this.version = result.protocolVersion;
+    await this.request("notifications/initialized", undefined, signal, true);
+    this.ready = true;
+  }
+
+  async listTools(signal) {
+    await this.connect(signal);
+    const result = await this.request("tools/list", {}, signal);
+    if (!Array.isArray(result.tools)) throw new ClientError("protocol", "Invalid MCP tool list.");
+    return result.tools;
   }
 
   async request(method, params, signal, notification = false) {

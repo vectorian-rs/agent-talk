@@ -33,6 +33,18 @@ test("empty polling only checks metadata, renews membership and never wakes a mo
   f.watcher.stop();
 });
 
+test("inbox checks announce the caller's display labels without changing authentication", async () => {
+  const f = fixture();
+  f.watcher.labels = { project: "hiko", name: "hiko / w-1" };
+  await f.watcher.start();
+  assert.equal(f.calls[0].args.project, "hiko");
+  assert.equal(f.calls[0].args.name, "hiko / w-1");
+  assert.equal(f.calls[0].args.node_id, f.state.member.node_id);
+  assert.ok(f.calls[0].args.token === f.state.member.token, "labels must preserve authentication");
+  assert.equal(f.events.length, 0);
+  f.watcher.stop();
+});
+
 test("one outstanding wake, then new mail is picked up after the busy agent settles", async () => {
   const f = fixture();
   f.state.inbox = { pending_messages: 1, next_message_id: "m-1" };
@@ -112,16 +124,68 @@ test("stop aborts in-flight checks and suppresses late wake-ups", async () => {
   assert.equal(f.timers.length, 0);
 });
 
-test("missing credentials wait quietly; cancellation pauses rather than restarting work", async () => {
+test("missing credentials are checked promptly without making network requests", async () => {
   const f = fixture();
   f.state.member = null;
   await f.watcher.start();
   assert.equal(f.statuses.at(-1).state, "waiting");
   assert.equal(f.calls.length, 0);
+  assert.equal(f.timers.at(-1).delay, 250);
+  f.watcher.stop();
+});
+
+test("cancellation pauses automatic turns while metadata checks continue; resume handles queued mail", async () => {
+  const f = fixture();
+  f.state.inbox = { pending_messages: 1, next_message_id: "m-1" };
+  await f.watcher.start();
   await f.watcher.settled(true);
   await f.watcher.check();
-  assert.equal(f.events.length, 0);
+  assert.equal(f.calls.length, 3);
+  assert.equal(f.events.length, 1);
   assert.equal(f.statuses.at(-1).state, "paused");
+  await f.watcher.resume();
+  assert.equal(f.events.length, 2);
+  f.watcher.stop();
+});
+
+test("a short saved lease adjusts the heartbeat interval", async () => {
+  const f = fixture();
+  f.state.member.expires_in_seconds = 1;
+  await f.watcher.start();
+  assert.ok(f.timers.at(-1).delay < 500);
+  f.state.member.expires_in_seconds = 86400;
+  await f.watcher.check();
+  assert.equal(f.timers.at(-1).delay, 10000);
+  f.watcher.stop();
+});
+
+test("failed wake-up callbacks retry without losing mail or exhausting successful-turn retries", async () => {
+  const f = fixture();
+  let attempts = 0;
+  f.state.inbox = { pending_messages: 1, next_message_id: "m-1" };
+  f.watcher.wake = async () => { attempts++; throw new Error("host failed with private data"); };
+  await f.watcher.start();
+  for (let n = 0; n < 4; n++) await f.watcher.check();
+  assert.equal(attempts, 5);
+  assert.equal(f.statuses.at(-1).state, "error");
+  assert.ok(!JSON.stringify(f.statuses).includes("private data"));
+  f.watcher.wake = (event) => { f.events.push(event); };
+  await f.watcher.check();
+  assert.equal(f.events.length, 1);
+  assert.equal(f.timers.at(-1).delay, 10000);
+  f.watcher.stop();
+});
+
+test("a failed recovery wake-up is handled and retried", async () => {
+  const f = fixture();
+  f.state.error = new ClientError("expired", "Expired");
+  f.watcher.wake = async () => { throw new Error("host failed"); };
+  await f.watcher.start();
+  f.watcher.wake = (event) => { f.events.push(event); };
+  await f.watcher.check();
+  await f.watcher.check();
+  assert.deepEqual(f.events, [{ kind: "recovery" }]);
+  f.watcher.stop();
 });
 
 test("an older server or a ring mismatch never causes an inbox wake", async () => {
@@ -131,4 +195,35 @@ test("an older server or a ring mismatch never causes an inbox wake", async () =
   assert.equal(f.statuses.at(-1).state, "error");
   assert.equal(f.events.length, 0);
   f.watcher.stop();
+});
+
+test("malformed inbox metadata and foreign ring responses never trigger a turn", async () => {
+  for (const result of [
+    { ring_id: "other-ring", inbox: { pending_messages: 1, next_message_id: "m-1" } },
+    { ring_id: "r-1", inbox: { pending_messages: 0, next_message_id: "m-1" } },
+    { ring_id: "r-1", inbox: { pending_messages: 1, next_message_id: "" } },
+    { ring_id: "r-1", inbox: { pending_messages: -1, next_message_id: null } },
+  ]) {
+    const f = fixture();
+    f.watcher.client.call = async () => result;
+    await f.watcher.start();
+    assert.equal(f.events.length, 0);
+    assert.equal(f.statuses.at(-1).state, "error");
+    f.watcher.stop();
+  }
+});
+
+test("stopping during an asynchronous wake suppresses late status updates", async () => {
+  const f = fixture();
+  f.state.inbox = { pending_messages: 1, next_message_id: "m-1" };
+  let finish;
+  f.watcher.wake = () => new Promise((resolve) => { finish = resolve; });
+  const checking = f.watcher.start();
+  await new Promise(setImmediate);
+  f.watcher.stop();
+  const count = f.statuses.length;
+  finish();
+  await checking;
+  assert.equal(f.statuses.length, count);
+  assert.equal(f.timers.length, 0);
 });

@@ -4,6 +4,7 @@ defmodule AgentTalk.Tools.ListNodes do
   inbox's pending_messages and next_message_id without removing messages, even with
   a role filter. Authenticates and renews only your lease. Host integrations can
   poll this metadata and wake your session; the session receives and handles mail.
+  Optional project and name labels update only the authenticated caller's display.
   """
   use Anubis.Server.Component, type: :tool, name: "list_nodes"
 
@@ -11,6 +12,18 @@ defmodule AgentTalk.Tools.ListNodes do
     field(:node_id, :string, required: true, description: "Your server-assigned node ID")
     field(:token, :string, required: true, description: "Your private node token")
     field(:role, :string, min_length: 1, max_length: 64, description: "Optional role filter")
+
+    field(:project, :string,
+      min_length: 1,
+      max_length: 128,
+      description: "Your repository or project label"
+    )
+
+    field(:name, :string,
+      min_length: 1,
+      max_length: 128,
+      description: "Your display name, e.g. hiko / w-1"
+    )
   end
 
   @impl true
