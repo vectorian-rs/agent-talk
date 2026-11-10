@@ -163,7 +163,8 @@ Reuse saved files to resume; use fresh files for a new team. Never share one
 membership between live agents or fork the PM to create workers. Server restarts
 preserve rings and registrations; leave agents running and Pi reconnects
 automatically. Lease time includes downtime. Recover unfinished work from the
-project record because queued messages and UI history remain in memory.
+project record because live inboxes remain in memory. Message history is archived
+in SQLite; recent entries return to the UI after restart.
 Rings already lost by an older server must be recreated once.
 
 Pi controls: `/agent-talk status`, `/agent-talk off`, and
@@ -236,12 +237,13 @@ port = 4000
 node_ttl_seconds = 86400
 message_history_limit = 50
 membership_file = "../data/memberships.json"
+history_file = "../data/history.sqlite3"
 ```
 
 Select with `--config`. Choosing `prod.toml` does not change the build mode.
 Numeric settings must be positive integers; ports are 1..65535. Invalid or unknown
 settings stop startup. The startup log reports version, config, lease, history
-limit and membership file.
+limit, membership file and conversation archive.
 
 `membership_file` resolves relative to the TOML file. The default private
 `data/memberships.json` stores rings, credentials, labels, lease activity and the
@@ -249,6 +251,25 @@ ID counter, using atomic replacements with mode `0600`. Keep it across restarts,
 back it up privately and use a separate file for each server. An unreadable or
 corrupt store stops startup; failed writes reject the operation. The default
 directory is gitignored. Changing this path selects different membership state.
+
+`history_file` also resolves relative to the TOML file. SQLite records every
+successful send and each recipient's collection time before acknowledging that
+operation; failed archive writes preserve inboxes and return an error. The private
+database and its journal files live in the gitignored data directory. Membership
+credentials remain in the separate membership file and are excluded from archive
+records. Message bodies are stored as sent.
+
+For daily review, choose a date under **Conversation archive · UTC**, select the
+current ring or **All rings**, and download Markdown. The export includes all that day's messages, even those outside
+the live window. `/history/export?date=2026-11-10` exports all rings; add `&ring=ring-123`
+to select one. Times and day boundaries are UTC. Reviewing/exporting never drains
+inboxes. SQLite uses [WAL](https://sqlite.org/wal.html) and exports use a separate
+read-only connection.
+
+Recording starts when this version is activated. Previously lost in-memory history
+cannot be reconstructed. Coordinate the initial server restart; existing memberships
+are preserved, while any uncollected volatile inbox contents are lost. Archive
+retention is independent of the UI limit and has no automatic deletion.
 
 For another port, update the MCP URL and add
 `--agent-talk-url http://127.0.0.1:<port>/mcp` to each Pi launch.
@@ -258,12 +279,13 @@ localhost/127.0.0.1 at that port; `allowed_origins` overrides them. Requests wit
 `Origin` are accepted. The UI secret is generated at startup. Remote access needs
 authenticated HTTPS and an appropriate origin allowlist.
 
-- Rings and unexpired registrations survive restarts. Inboxes and UI history do not.
+- Rings, unexpired registrations and archived conversations survive restarts.
+  Live inboxes do not; an archived entry marked `Not collected` is not a pending task.
 - Expiry discards inboxes. Receive removes mail before the response, so failures
   can lose it. Keep durable tasks/results in your project's record.
 - Each inbox holds 1,000 messages; messages are at most 65,536 UTF-8 bytes.
 - UI history defaults to the last 50 successful sends across rings. A broadcast
-  is one entry; viewing the UI never consumes mail.
+  is one entry. This bounds the live window, not the SQLite archive.
 
 ## MCP reference
 

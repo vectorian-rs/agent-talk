@@ -6,7 +6,11 @@ defmodule AgentTalk.Web.OperatorLive do
   @impl true
   def mount(_params, _session, socket) do
     if connected?(socket), do: Phoenix.PubSub.subscribe(AgentTalk.PubSub, Hub.topic())
-    {:ok, socket |> assign(party: "all", query: "", ring: nil) |> refresh()}
+
+    {:ok,
+     socket
+     |> assign(party: "all", query: "", ring: nil, review_date: Date.to_iso8601(Date.utc_today()))
+     |> refresh()}
   end
 
   @impl true
@@ -45,7 +49,8 @@ defmodule AgentTalk.Web.OperatorLive do
       snapshot: snapshot,
       rings: rings,
       ring: ring,
-      history_limit: snapshot.history_limit
+      history_limit: snapshot.history_limit,
+      history_persistent: snapshot.history_persistent
     )
     |> scope_ring()
   end
@@ -128,7 +133,7 @@ defmodule AgentTalk.Web.OperatorLive do
 
   defp delivery(event) do
     case length(event.received_by) do
-      0 -> "Queued"
+      0 -> if(event.pending_to == [], do: "Not collected", else: "Queued")
       count when count == length(event.to) -> "Collected"
       count -> "Collected #{count}/#{length(event.to)}"
     end
@@ -185,6 +190,15 @@ defmodule AgentTalk.Web.OperatorLive do
                 <option :if={@rings == []} value="">No rings</option>
                 <option :for={ring <- @rings} value={ring.id} selected={@ring == ring.id}>{ring.label}</option>
               </select>
+            </form>
+            <form :if={@history_persistent} id="history-export" class="history-export" action="/history/export" method="get">
+              <label for="history-date" class="small-label">Conversation archive · UTC</label>
+              <input id="history-date" name="date" type="date" value={@review_date} required />
+              <select name="ring" aria-label="Archive ring scope">
+                <option :if={@ring} value={@ring} selected>Selected ring</option>
+                <option value="" selected={is_nil(@ring)}>All rings</option>
+              </select>
+              <button type="submit">Download day (Markdown)</button>
             </form>
             <div class="panel-heading">
               <h2 id="agents-title">Registered agents</h2><span class="count-label">{length(@nodes)}</span>
@@ -267,7 +281,7 @@ defmodule AgentTalk.Web.OperatorLive do
             <p :if={@messages != []} class="stream-end">Showing {length(@visible_messages)} of {length(@messages)} retained messages.</p>
           </section>
         </div>
-        <footer class="operator-footer"><span>AgentTalk</span><span>Shared log: memory only · limit: {@history_limit}</span></footer>
+        <footer class="operator-footer"><span>AgentTalk</span><span>{if @history_persistent, do: "Archive: SQLite", else: "Log: memory only"} · live window: {@history_limit}</span></footer>
       </main>
     </div>
     """
