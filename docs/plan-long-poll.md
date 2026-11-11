@@ -1,10 +1,15 @@
 # Plan: long-poll inbox watching (`wait_seconds`)
 
+Status: deferred. Implement inbox recovery (#6), then reply references (#5).
+Keep the current 10-second watcher until lower notification latency is a
+requirement; this plan adds timer and concurrency handling without changing
+which messages agents can receive.
+
 ## Problem
 
 Delivery latency is bounded by the watcher's polling interval
-(`integrations/polling/watcher.mjs`, `intervalMs = 10_000`), and every empty
-poll is a wasted round trip. The hub serializes everything through one
+(`integrations/polling/watcher.mjs`, `intervalMs = 10_000`). Each empty
+check also makes a round trip. The hub serializes everything through one
 GenServer (`lib/agent_talk/hub.ex`), so it knows the instant a message is
 enqueued; a caller should be able to park until that instant.
 
@@ -25,26 +30,33 @@ negative values are `invalid_request`.
 
 ### Hub mechanism (the whole of it)
 
-- State gains `waiters :: %{node_id => {from, timer_ref, args}}` — at most one
-  per node. A second park from the same node releases the first immediately.
+- State gains `waiters :: %{node_id => {from, timer_ref, args, wait_ms}}` —
+  at most one per node. Use
+  `:erlang.start_timer(wait_ms, self(), {:waiter_timeout, node_id})`; its
+  returned timer reference identifies that park. A second park releases the
+  first and cancels its timer before replacing it.
 - `dispatch({:list, args}, ...)` returns a new `{:park, node_id, wait_ms}`
   shape when the wait applies. `handle_call` runs the normal
   `persist → record → notify` pipeline (the park already renewed the lease and
-  applied labels via `authenticate/3`), stores the waiter with a
-  `Process.send_after(self(), {:waiter_timeout, node_id}, wait_ms)`, and
-  returns `{:noreply, persisted}`.
+  applied labels via `authenticate/3`), starts the timer, stores the waiter
+  and returns `{:noreply, persisted}`.
 - **Waking is re-dispatch, not a parallel reply path**: to wake a waiter, run
   its stored args minus `wait_seconds` back through `dispatch({:list, ...})`
-  and `GenServer.reply` with the result. No second payload builder exists, so
-  park replies can never drift from poll replies.
+  and `GenServer.reply` with the result, setting `waited_seconds` to the
+  stored `wait_ms / 1000` rather than the immediate re-dispatch's zero.
+  Cancel the timer when releasing the waiter. No second payload builder is
+  needed; the field reports the original grant even on an early wake.
 - **One wake function, no touched send path**: `wake_ready_waiters(state)`
   runs at the end of `handle_call` and the `:sweep` branch of `handle_info`.
   For each waiter: node gone → reply `{:error, :expired, @missing_node_error}`;
   inbox non-empty → re-dispatch and reply; otherwise keep waiting. The send
   branch of `communicate/3` is not modified at all.
-- `{:waiter_timeout, node_id}` in `handle_info`: re-dispatch (empty payload),
-  reply, drop the waiter. State changes from wake-time re-dispatch are
-  presence-only and flow through the existing presence-deferral persistence.
+- `{:timeout, timer_ref, {:waiter_timeout, node_id}}` in `handle_info`: act
+  only if the current waiter has that exact timer reference; otherwise
+  ignore the stale event.
+  Timer cancellation alone is insufficient because its message may already
+  be queued. For a matching waiter, re-dispatch, reply and drop it. State
+  changes from re-dispatch flow through existing presence persistence.
 
 ### Plumbing
 
@@ -54,12 +66,21 @@ negative values are `invalid_request`.
   sentence.
 - `integrations/polling/mcp.mjs`: `request/4` hard-codes
   `AbortSignal.timeout(15_000)`; make the timeout a per-call option that
-  `call()` forwards.
-- `integrations/polling/watcher.mjs`: when the previous reply carried
-  `waited_seconds`, the next poll sends
-  `wait_seconds = min(25, expires_in_seconds / 3)` and reschedules with zero
-  delay. Everything else — failure backoff, 250ms membership wait, paused
-  state, wake logic — is untouched.
+  `call()` forwards. Use `wait_ms + 5_000` for watches; other calls keep
+  their current timeout.
+- The watcher owns a separate `McpClient` and MCP session from the main
+  agent. Anubis serializes ordinary requests within a session; sharing one
+  could hold the agent's send/receive behind a parked watch.
+- `integrations/polling/watcher.mjs`: after detecting `waited_seconds`, the
+  next checks request `wait_seconds = min(25, expires_in_seconds / 3)`.
+  Schedule by outcome, not capability alone. Successful empty replies after
+  a granted wait (`waited_seconds > 0`) immediately start the next long poll.
+  Non-empty inboxes or immediate replies (`waited_seconds == 0`) keep the
+  ordinary heartbeat interval, including busy, paused and stalled agents.
+  Repeated immediate replies must not spin.
+- Missing membership keeps the 250ms check; errors keep existing backoff.
+  Old-server replies without `waited_seconds` keep interval polling. Existing
+  stop, cancellation, wake budgeting and settled checks still apply.
 
 ## Deliberately cut
 
@@ -70,29 +91,37 @@ negative values are `invalid_request`.
 
 ## Acceptance criteria
 
-1. **Gate (write this test first)**: over real HTTP in `mcp_test.exs`, client
-   A parks with `wait_seconds: 10` and client B's send unblocks A in < 2s with
-   the new message visible in A's inbox metadata. This also proves Anubis does
-   not serialize a parked tool call with other traffic — if it does, stop and
-   redesign before writing anything else.
+1. **Gate (write this test first)**: over real HTTP in `mcp_test.exs`, a
+   dedicated watcher session parks with `wait_seconds: 10`. Other sessions
+   still send and receive in < 2s; a send to the watched node unblocks its
+   metadata check in < 2s. This tests concurrency across sessions, not within
+   one. If independent sessions block, stop and redesign.
 2. With no send, a parked call returns an empty payload after the effective
    wait (small real waits in `hub_test.exs`; timers are real even though the
    clock is injected) with `waited_seconds > 0`.
 3. A non-empty inbox returns immediately with `waited_seconds == 0`.
 4. Node expiry during a park replies with error code `expired`.
-5. A second park from the same node releases the first immediately; no waiter
-   leaks (waiters map empty after each test).
+5. A second park from the same node releases the first immediately. Inject
+   the old timeout after replacement: it must neither reply to nor remove
+   the new waiter. A matching timeout or send releases the new waiter once;
+   no waiter leaks remain.
 6. A call without `wait_seconds` behaves exactly as today except for the added
    `waited_seconds: 0` field; `wait_seconds: "x"` or `-1` is
    `invalid_request`.
-7. Watcher (fake timers): a reply with `waited_seconds` triggers an immediate
-   long-polled re-poll; replies without it keep today's interval pacing;
-   failure backoff still applies after a long-poll error.
-8. `mix test`, all Node suites, and all three smokes pass; only tests
+7. Watcher (fake timers): an empty waited reply schedules immediately;
+   immediate replies and old-server replies keep interval pacing. Leave a
+   message unread through repeated checks in busy, paused and stalled states:
+   every check must retain a nonzero heartbeat delay and bounded wake-ups.
+   Errors keep their backoff even after support was detected.
+8. Stopping aborts an in-flight HTTP watch and suppresses late wake-ups;
+   missing membership keeps its existing cadence. Real Pi smoke covers a
+   parked watcher alongside main-session send/receive and broker restart.
+9. `mix test`, all Node suites, and all three smokes pass; only tests
    asserting exact reply key sets may change.
 
 ## Risks
 
-- Anubis request serialization — covered by criterion 1 as a hard gate.
+- Session ownership and independent-session concurrency — criterion 1 is a
+  hard gate; a two-client test does not prove same-session concurrency.
 - Bandit request timeouts must exceed the 25s cap; verify and, if needed, set
   explicitly in the Bandit opts where the router is mounted.
