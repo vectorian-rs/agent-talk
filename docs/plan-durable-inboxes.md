@@ -1,0 +1,126 @@
+# Plan: durable inboxes across hub restarts
+
+## Problem
+
+Membership survives a restart (`MembershipStore`) and every message plus its
+collection status survives in the SQLite archive (`collected_json`), but
+queued inboxes do not: `restore/3` in `lib/agent_talk/hub.ex` resets every
+node to `inbox: :queue.new()`. A restart silently drops mail that was
+acknowledged with `delivered_to` but not yet collected — the one loss mode
+agents cannot detect, because their lease and ids remain valid.
+
+## Simplest solution: derive, don't store
+
+Implement this plan before reply references (#5); long polling (#4) remains
+deferred. Recovery reuses the existing SQLite archive, independently of the
+operator's last-50 live window.
+
+A pending message is fully derivable from state already persisted:
+
+> pending for node N = messages where `N ∈ to` and N has not collected, and
+> N's membership survived.
+
+Membership restore already removes expired nodes, so only surviving node IDs
+participate. `History.recent/2` is insufficient: unrelated traffic can evict
+an unread assignment from the live window while its archive row survives.
+Add one pending-message query over the existing `messages` table. No new
+table, schema migration (`user_version` stays 1), or delivery protocol is
+needed.
+
+### Changes
+
+- `History.pending(db, live_node_ids)` returns archived events in ascending
+  `sequence` order where at least one live recipient appears in `to` but not
+  in `collected_json`. Use a parameterized query across the full archive,
+  with no `history_limit` or day filter. Reuse `decode_rows/1`; filter in SQL
+  so collected and unrelated history is not all loaded into memory.
+- In `Hub.init/1`, after `restore/3` has removed expired memberships, load
+  pending events for the surviving IDs. Enqueue each event, in query order,
+  to `(event.to -- event.received_by)` intersected with the live IDs —
+  `decode_rows/1` already computes `received_by` from `collected_json`, so
+  the hub does no collected-state parsing of its own. A query failure stops
+  startup; it must not silently produce empty inboxes.
+- Use one `@message_fields` allowlist and an `inbox_message(event)` helper in
+  the hub for both live sends and recovered inbox copies. UI/archive-only
+  metadata stays out of inbox payloads. Plan #5 adds `reply_to` to this same
+  definition and verifies it survives recovery.
+- Keep `History.recent/2` solely for restoring the bounded operator window.
+  Recovery must not insert older pending events into that window.
+- Restore every pending delivery. If `max_inbox` was lowered below a saved
+  backlog, retain that backlog; existing send-capacity checks reject new
+  mail until it drains. Do not clamp or discard previously accepted mail.
+
+Update the README persistence section — and only it: queued, uncollected mail
+survives a hub restart when the archive is enabled and the recipient's
+membership survives. Expiry still discards that node's mail; a rejoin
+receives a new ID. The agent-facing registration and tool instructions stay
+untouched: nothing in them becomes false, and the durability is transparent
+to agents. The README should also be honest that membership survival is
+approximate near expiry — presence writes are deferred up to `ttl/20`, so a
+node last seen just before a crash can restore with a stale `last_seen` and
+expire at startup, taking its pending mail with it.
+
+### Delivery boundary
+
+- **History disabled** (`history_file: nil`): nothing to rebuild; inboxes stay
+  ephemeral, exactly today. The existing `history_persistent` snapshot flag
+  already tells the operator which mode they run in.
+- **Collection is not client acknowledgment**: receive commits
+  `collected_json` before its HTTP response. If that response is lost, the
+  message remains collected and recovery does not replay it. This provides
+  restart recovery for queued mail, not at-least-once delivery or proof of
+  processing. Explicit acknowledgments/retries remain out of scope.
+
+## Deliberately cut
+
+- A dedicated pending-messages table or any new persistence.
+- Expiry tombstones in `collected_json` and per-message delivery states in
+  the LiveView — this plan makes them cheap later, but they are a separate
+  feature.
+- Any client, protocol, or error-code change.
+
+## Acceptance criteria
+
+All in `persistence_test.exs` unless noted:
+
+1. Send → stop hub → start hub on the same files → the recipient's first
+   `receive` returns the message and its next receive is empty. Before
+   collection, inbox metadata shows the count and `next_message_id`.
+2. A message collected before the restart is not redelivered after it.
+3. Expired mail is not resurrected: send to a node, let it expire, restart,
+   rejoin with the ring token — new node id, empty inbox.
+4. FIFO order survives a restart (send two, restart, receive returns both in
+   order).
+5. With `history_file: nil`, restart behavior is exactly today's (empty
+   inboxes).
+6. Send one unread assignment to worker A, then more than `history_limit`
+   messages to worker B, with a small injected `history_limit` (e.g. 3 — not
+   50 fsynced sends; also cover traffic in another ring). A's assignment
+   survives restart even though it is outside the live window.
+7. A saved backlog larger than `max_inbox` restores fully. (Rejecting new
+   sends while full and accepting them after draining is untouched
+   `check_capacity/2` behavior, already covered by existing tests.)
+8. Fan-out collection is per recipient: after A collects and B does not,
+   restart restores the message only for B.
+9. A failed pending query stops startup. (Collection committing before the
+   HTTP response is the Delivery boundary above, and its restart consequence
+   is criterion 2 — not retested here.)
+10. `examples/pi_smoke.exs` ("automatic replies after server restart") passes
+   unchanged — if it fails, it depended on restart-drops and that is signal.
+11. `mix test`, all Node suites, and all three smokes pass; existing
+   assertions change only where they encoded restart-clears-inboxes.
+
+## Risks
+
+- Hidden assumptions that restart implies empty inboxes (persistence tests,
+  possibly the Pi smoke) — most of the real work is this audit; the mechanism
+  is small.
+- Pending-query cost grows with archive size: recipients live inside JSON
+  blobs, so recovery is an unindexed full-table scan. Acceptable once per
+  startup at this scale; a normalized deliveries table is the later fix if
+  boot time ever hurts.
+- Plan #5 must extend the shared inbox field definition and test recovery of
+  replies, including a parent outside the live window.
+- Interaction with `docs/plan-long-poll.md`: none — waiters are in-memory and
+  die with the hub; restored pending mail satisfies the first post-restart
+  `list_nodes` immediately.

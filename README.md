@@ -163,8 +163,10 @@ host checks and does not prove the model is working.
 Reuse saved files to resume; use fresh files for a new team. Never share one
 membership between live agents or fork the PM to create workers. Server restarts
 preserve rings and registrations; leave agents running and Pi reconnects
-automatically. Lease time includes downtime. Recover unfinished work from the
-project record because live inboxes remain in memory. Message history is archived
+automatically. Lease time includes downtime. With the conversation archive
+enabled, queued mail a recipient has not collected is restored at startup;
+without it, inboxes are memory only, so recover unfinished work from the
+project record. Message history is archived
 in SQLite; recent entries return to the UI after restart.
 Rings already lost by an older server must be recreated once.
 
@@ -258,7 +260,10 @@ successful send and each recipient's collection time before acknowledging that
 operation; failed archive writes preserve inboxes and return an error. The private
 database and its journal files live in the gitignored data directory. Membership
 credentials remain in the separate membership file and are excluded from archive
-records. Message bodies are stored as sent.
+records. Message bodies are stored as sent. A corrupt archive — including any
+row that inbox recovery cannot decode — stops startup rather than faking empty
+inboxes; to start anyway, move the database aside (the moved file keeps the
+history, queued mail is lost).
 
 For daily review, choose a date under **Conversation archive · UTC**, select the
 current ring or **All rings**, and download Markdown. The export includes all that day's messages, even those outside
@@ -268,9 +273,12 @@ inboxes. SQLite uses [WAL](https://sqlite.org/wal.html) and exports use a separa
 read-only connection.
 
 Recording starts when this version is activated. Previously lost in-memory history
-cannot be reconstructed. Coordinate the initial server restart; existing memberships
-are preserved, while any uncollected volatile inbox contents are lost. Archive
-retention is independent of the UI limit and has no automatic deletion.
+cannot be reconstructed, and the first activating restart cannot restore mail that
+was never archived. From then on, with the archive enabled, a message acknowledged with
+`delivered_to` is either collected (a receive removed it, even if that
+response was lost in transit) or discarded by its recipient's expiry — never
+dropped by a hub restart.
+Archive retention is independent of the UI limit and has no automatic deletion.
 
 For another port, update the MCP URL and add
 `--agent-talk-url http://127.0.0.1:<port>/mcp` to each Pi launch.
@@ -281,7 +289,11 @@ localhost/127.0.0.1 at that port; `allowed_origins` overrides them. Requests wit
 authenticated HTTPS and an appropriate origin allowlist.
 
 - Rings, unexpired registrations and archived conversations survive restarts.
-  Live inboxes do not; an archived entry marked `Not collected` is not a pending task.
+  With the archive enabled, queued uncollected mail is restored for surviving
+  members and shows as `Queued`; without it, live inboxes are memory only.
+- Membership survival is approximate near expiry: lease activity is written at
+  most every `ttl/20`, so a node last seen just before a crash can still expire
+  at startup and its queued mail is discarded with it.
 - Expiry discards inboxes. Receive removes mail before the response, so failures
   can lose it. Keep durable tasks/results in your project's record.
 - Each inbox holds 1,000 messages; messages are at most 65,536 UTF-8 bytes.

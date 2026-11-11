@@ -145,6 +145,132 @@ defmodule AgentTalk.PersistenceTest do
     assert {:ok, _} = Hub.list_nodes(auth(pm), hub)
   end
 
+  describe "inbox recovery from the archive" do
+    setup %{opts: opts, tmp_dir: dir} do
+      stop_supervised!(:persistent_hub)
+      opts = opts ++ [history_file: Path.join(dir, "history.sqlite3")]
+      %{opts: opts, hub: start_hub(opts)}
+    end
+
+    test "queued mail survives a restart, in FIFO order and the live payload shape, exactly once",
+         %{hub: hub, opts: opts} do
+      pm = register(hub, %{role: "pm"})
+      worker = register(hub, %{role: "worker", ring_token: pm.ring_token})
+      assert {:ok, %{message_id: first}} = send_message(hub, pm, worker, "First")
+      assert {:ok, %{message_id: second}} = send_message(hub, pm, worker, "Second")
+
+      hub = restart(opts)
+
+      assert {:ok, %{inbox: %{pending_messages: 2, next_message_id: ^first}}} =
+               Hub.list_nodes(auth(worker), hub)
+
+      assert {:ok, %{messages: [restored, %{id: ^second}]}} = receive_messages(hub, worker)
+      assert %{id: ^first, message: "First"} = restored
+      assert restored.from == pm.node_id
+
+      assert Enum.sort(Map.keys(restored)) == [:from, :id, :message, :ring_id, :sent_at],
+             "recovered copies must keep the agreed inbox payload contract"
+
+      assert {:ok, %{messages: []}} = receive_messages(hub, worker)
+      hub = restart(opts)
+      assert {:ok, %{messages: []}} = receive_messages(hub, worker)
+    end
+
+    test "expired mail is not resurrected for a rejoined identity", %{
+      hub: hub,
+      opts: opts,
+      clock: clock
+    } do
+      pm = register(hub, %{role: "pm"})
+      worker = register(hub, %{role: "worker", ring_token: pm.ring_token})
+      assert {:ok, _} = send_message(hub, pm, worker, "Doomed")
+      advance(clock, 1001)
+
+      hub = restart(opts)
+      assert {:ok, %{nodes: []}} = Hub.snapshot(hub)
+      rejoined = register(hub, %{role: "worker", ring_token: pm.ring_token})
+      assert rejoined.node_id != worker.node_id
+      assert {:ok, %{messages: []}} = receive_messages(hub, rejoined)
+    end
+
+    test "recovery is not bounded by the live history window", %{opts: opts} do
+      opts = Keyword.put(opts, :history_limit, 3)
+      hub = restart(opts)
+      pm = register(hub, %{role: "pm"})
+      slow = register(hub, %{role: "worker", ring_token: pm.ring_token})
+      busy = register(hub, %{role: "worker", ring_token: pm.ring_token})
+      assert {:ok, _} = send_message(hub, pm, slow, "Assignment")
+      for n <- 1..4, do: {:ok, _} = send_message(hub, pm, busy, "Noise #{n}")
+      other_pm = register(hub, %{role: "pm"})
+      other = register(hub, %{role: "worker", ring_token: other_pm.ring_token})
+      assert {:ok, _} = send_message(hub, other_pm, other, "Other ring")
+
+      hub = restart(opts)
+      assert {:ok, %{messages: window}} = Hub.snapshot(hub)
+      assert length(window) == 3
+
+      refute Enum.any?(window, &(&1.message == "Assignment")),
+             "recovery must not insert older pending events into the operator window"
+
+      assert {:ok, %{messages: [%{message: "Assignment"}]}} = receive_messages(hub, slow)
+      assert {:ok, %{messages: noise}} = receive_messages(hub, busy)
+      assert Enum.map(noise, & &1.message) == for(n <- 1..4, do: "Noise #{n}")
+      assert {:ok, %{messages: [%{message: "Other ring"}]}} = receive_messages(hub, other)
+    end
+
+    test "a saved backlog larger than max_inbox restores fully", %{hub: hub, opts: opts} do
+      pm = register(hub, %{role: "pm"})
+      worker = register(hub, %{role: "worker", ring_token: pm.ring_token})
+      for n <- 1..3, do: {:ok, _} = send_message(hub, pm, worker, "Backlog #{n}")
+
+      hub = restart(Keyword.put(opts, :max_inbox, 2))
+      assert {:ok, %{inbox: %{pending_messages: 3}}} = Hub.list_nodes(auth(worker), hub)
+      assert {:ok, %{messages: [_, _, _]}} = receive_messages(hub, worker)
+    end
+
+    test "fan-out recovery is per recipient", %{hub: hub, opts: opts} do
+      pm = register(hub, %{role: "pm"})
+      prompt = register(hub, %{role: "worker", ring_token: pm.ring_token})
+      tardy = register(hub, %{role: "worker", ring_token: pm.ring_token})
+
+      assert {:ok, _} = send_message(hub, pm, [prompt, tardy], "Fan-out")
+
+      assert {:ok, %{messages: [_]}} = receive_messages(hub, prompt)
+
+      hub = restart(opts)
+      assert {:ok, %{messages: []}} = receive_messages(hub, prompt)
+      assert {:ok, %{messages: [%{message: "Fan-out"}]}} = receive_messages(hub, tardy)
+    end
+
+    test "a failed pending query stops startup instead of faking empty inboxes", %{
+      hub: hub,
+      opts: opts
+    } do
+      opts = Keyword.put(opts, :history_limit, 2)
+      hub = restart(opts)
+      pm = register(hub, %{role: "pm"})
+      worker = register(hub, %{role: "worker", ring_token: pm.ring_token})
+      assert {:ok, _} = send_message(hub, pm, worker, "Valid 1")
+      assert {:ok, _} = send_message(hub, pm, worker, "Valid 2")
+      stop_supervised!(:persistent_hub)
+
+      # A malformed archived event addressed to a live node, placed below the
+      # live window so only the pending query decodes it.
+      {:ok, db} = Exqlite.Sqlite3.open(opts[:history_file])
+
+      :ok =
+        Exqlite.Sqlite3.execute(
+          db,
+          "INSERT INTO messages(sequence, message_id, ring_id, sent_date, event_json) " <>
+            "VALUES (0, 'message-x', 'ring-x', '2027-01-01', '{\"to\":[\"#{worker.node_id}\"]}')"
+        )
+
+      :ok = Exqlite.Sqlite3.close(db)
+
+      assert {:error, _} = start_supervised(Supervisor.child_spec({Hub, opts}, id: :invalid_hub))
+    end
+  end
+
   defp start_hub(opts),
     do: start_supervised!(Supervisor.child_spec({Hub, opts}, id: :persistent_hub))
 
@@ -164,10 +290,14 @@ defmodule AgentTalk.PersistenceTest do
     node
   end
 
-  defp send_message(hub, sender, recipient, message),
+  defp send_message(hub, sender, recipients, message),
     do:
       Hub.communicate(
-        auth(sender, %{action: "send", to: [recipient.node_id], message: message}),
+        auth(sender, %{
+          action: "send",
+          to: recipients |> List.wrap() |> Enum.map(& &1.node_id),
+          message: message
+        }),
         hub
       )
 
