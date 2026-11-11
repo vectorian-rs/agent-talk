@@ -260,7 +260,10 @@ successful send and each recipient's collection time before acknowledging that
 operation; failed archive writes preserve inboxes and return an error. The private
 database and its journal files live in the gitignored data directory. Membership
 credentials remain in the separate membership file and are excluded from archive
-records. Message bodies are stored as sent.
+records. Message bodies are stored as sent. A corrupt archive — including any
+row that inbox recovery cannot decode — stops startup rather than faking empty
+inboxes; to start anyway, move the database aside (the moved file keeps the
+history, queued mail is lost).
 
 For daily review, choose a date under **Conversation archive · UTC**, select the
 current ring or **All rings**, and download Markdown. The export includes all that day's messages, even those outside
@@ -272,8 +275,9 @@ read-only connection.
 Recording starts when this version is activated. Previously lost in-memory history
 cannot be reconstructed, and the first activating restart cannot restore mail that
 was never archived. From then on, with the archive enabled, a message acknowledged with
-`delivered_to` is either collected or discarded by its recipient's expiry —
-never by a hub restart.
+`delivered_to` is either collected (a receive removed it, even if that
+response was lost in transit) or discarded by its recipient's expiry — never
+dropped by a hub restart.
 Archive retention is independent of the UI limit and has no automatic deletion.
 
 For another port, update the MCP URL and add

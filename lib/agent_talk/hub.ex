@@ -8,14 +8,14 @@ defmodule AgentTalk.Hub do
   # AgentTalk.tool_reply); the message is advisory prose, free to change.
   # Codes: :invalid_request, :invalid_labels, :invalid_ring_token,
   # :invalid_token, :expired, :inbox_full, :storage.
+  @labels_error "project and name must be nonempty labels of at most 128 characters without control characters"
+  @missing_node_error "node is not registered or has expired; join again with role and ring_token"
+  @invalid_token_error "invalid node token"
+
   # The inbox copy of a message. Recovery rebuilds exactly this shape from
   # archived events, so live sends and restored copies must share this one
   # definition; UI/archive-only metadata stays out of inbox payloads.
   @message_fields [:id, :from, :ring_id, :message, :sent_at]
-
-  @labels_error "project and name must be nonempty labels of at most 128 characters without control characters"
-  @missing_node_error "node is not registered or has expired; join again with role and ring_token"
-  @invalid_token_error "invalid node token"
 
   def start_link(opts) do
     GenServer.start_link(__MODULE__, opts, name: Keyword.get(opts, :name, __MODULE__))

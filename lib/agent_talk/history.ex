@@ -84,19 +84,19 @@ defmodule AgentTalk.History do
   def pending(_db, []), do: {:ok, []}
 
   def pending(db, live_ids) do
-    placeholders = Enum.map_join(live_ids, ", ", fn _ -> "?" end)
-
+    # One JSON-encoded parameter instead of a placeholder per node: the list
+    # can outgrow SQLite's bound-variable limit, a JSON argument cannot.
     sql = """
     SELECT event_json, collected_json FROM messages
     WHERE EXISTS (
       SELECT 1 FROM json_each(event_json, '$.to') AS recipient
-      WHERE recipient.value IN (#{placeholders})
+      WHERE recipient.value IN (SELECT value FROM json_each(?))
         AND recipient.value NOT IN (SELECT key FROM json_each(collected_json))
     )
     ORDER BY sequence
     """
 
-    with {:ok, rows} <- query(db, sql, live_ids) do
+    with {:ok, rows} <- query(db, sql, [Jason.encode!(live_ids)]) do
       decode_rows(rows)
     end
   end
