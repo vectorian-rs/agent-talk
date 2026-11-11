@@ -2,104 +2,100 @@
 
 ## Problem
 
-Membership survives a restart (`MembershipStore`), and every message and its
-collection status survive in the SQLite archive (`AgentTalk.History`,
-`collected_json`), but queued inboxes do not: `restore/3` in
-`lib/agent_talk/hub.ex` resets every node to `inbox: :queue.new()`. A hub
-restart therefore silently drops mail that was sent and acknowledged
-(`delivered_to`) but not yet collected — the one loss mode agents cannot
-detect, because their lease and ids remain valid.
+Membership survives a restart (`MembershipStore`) and every message plus its
+collection status survives in the SQLite archive (`collected_json`), but
+queued inboxes do not: `restore/3` in `lib/agent_talk/hub.ex` resets every
+node to `inbox: :queue.new()`. A restart silently drops mail that was
+acknowledged with `delivered_to` but not yet collected — the one loss mode
+agents cannot detect, because their lease and ids remain valid.
 
-## Key insight: no new storage
+## Simplest solution: derive, don't store
 
-A pending message is fully derivable from state we already persist:
+A pending message is fully derivable from state already persisted:
 
-> pending for node N = messages where `N ∈ to` and `N ∉ collected_json`,
-> and N's membership survived.
+> pending for node N = messages where `N ∈ to` and N has not collected, and
+> N's membership survived.
 
-Expiry is the only path that discards queued mail, and expiry also removes the
-node from the membership file — so an expired node is never restored, and its
-discarded messages are never resurrected. For every node that *is* restored,
-"uncollected" and "queued" are the same set. Rebuilding inboxes from the
-archive is therefore consistent with today's semantics, minus the restart data
-loss.
+Expiry is the only path that discards queued mail, and expiry also removes
+the node from the membership file — so an expired node is never restored and
+its discarded mail is never resurrected. For every node that *is* restored,
+"uncollected" equals "queued". And `init/1` already loads the needed data:
+`History.recent/2` populates `state.messages` with events carrying `to` and
+`received_by`. **No new storage, no new SQL, no schema change
+(`user_version` stays 1), no change to live send/receive paths.**
 
-`init/1` already loads this exact data: `History.recent(db, history_limit)`
-populates `state.messages` with events carrying `to` and `received_by`. The
-rebuild needs no new SQL and no schema change (`user_version` stays 1).
+### The change (~20 lines)
 
-## Hub changes (`lib/agent_talk/hub.ex`)
+In `init/1`, after `messages` is merged into state (note: `restore/3` runs
+before that merge, so the rebuild goes after it) and before `expire_nodes/2`
+applies:
 
-In `restore/3` (or just after it in `init/1`, once `state.messages` is
-loaded — note `restore/3` currently runs *before* messages are merged in, so
-the rebuild belongs in `init/1` after the `Map.merge` that sets `messages`):
-
-- For each restored node, rebuild
+- For each restored node:
   `inbox = state.messages |> Enum.filter(&(node_id in &1.to and node_id not in &1.received_by)) |> Enum.reverse() |> Enum.map(&Map.take(&1, [:id, :from, :ring_id, :message, :sent_at])) |> :queue.from_list()`.
-  `state.messages` is newest-first; the reverse restores FIFO order. The
-  `Map.take` reconstructs exactly the inbox-copy shape built in the `"send"`
-  branch of `communicate/3`.
-- Clamp to `max_inbox` (keep the oldest, matching queue order) so a restart
-  cannot produce an inbox the live path would have refused.
-- Then run `expire_nodes/2` as today — expiry still wins over restoration.
+  `state.messages` is newest-first; the reverse restores FIFO order, and the
+  `Map.take` reconstructs exactly the inbox-copy shape the `"send"` branch
+  builds.
+- Clamp to `max_inbox`, keeping the oldest (queue order), so a restart cannot
+  produce an inbox the live path would have refused.
+- Expiry still runs afterward and still wins.
 
-No changes to the send/receive paths, persistence pipeline, or error codes.
+Documentation: replace the restart caveat implied by "recipient expiry can
+discard them before collection" with the new story — *a message acknowledged
+with `delivered_to` is either collected or discarded by the recipient's
+expiry, never by a hub restart* — in the README persistence section and the
+`registration/2` instructions text.
 
-## Semantics and bounds
+### Bounds that keep it simple
 
 - **Retention window**: the rebuild sees only the `history_limit` most recent
-  events (default in config). A message older than the window that was never
-  collected is not restored. This is the same bound the operator view already
-  lives with; document it in the README's persistence section rather than
-  adding a second query path.
+  events, the same bound the operator view already lives with. An uncollected
+  message older than the window is not restored; documented, not engineered
+  around.
 - **History disabled** (`history_file: nil`): nothing to rebuild; inboxes stay
-  ephemeral, exactly today's behavior. The `history_persistent` flag already
-  surfaced in `snapshot` tells the operator which mode they are in.
-- **Collection durability**: `History.record` for `receive` updates
-  `collected_json` inside a transaction with `synchronous=FULL`, and a failed
-  record already fails the receive (the `:storage` error path in
-  `handle_call`), so a crash cannot lose a collection mark that the client saw
-  succeed — no double-delivery after restart. The reverse (marked collected,
-  reply lost in transit) means a dropped message the agent never saw; that is
-  today's behavior for any lost HTTP reply and stays out of scope.
-- **At-least-once framing**: after this change the hub's story is "a message
-  acknowledged with `delivered_to` is either collected, or discarded by the
-  recipient's expiry — never by a hub restart." Put that sentence in the
-  README and in the `registration/2` instructions text, replacing the current
-  "recipient expiry can discard them before collection" caveat's silent
-  restart case.
+  ephemeral, exactly today. The existing `history_persistent` snapshot flag
+  already tells the operator which mode they run in.
+- **No double-delivery**: `History.record` for `receive` commits
+  `collected_json` with `synchronous=FULL`, and a failed record already fails
+  the receive (the `:storage` error path), so a crash cannot lose a collection
+  mark the client saw succeed.
 
-## Tests
+## Deliberately cut
 
-- `test/agent_talk/persistence_test.exs`: send → stop hub → start hub with the
-  same files → recipient's `receive` returns the message; `list_nodes` inbox
-  metadata shows it pending before collection. Update any existing assertion
-  that encodes the old "restart clears inboxes" behavior.
-- Collected-before-restart message is *not* re-delivered after restart.
-- Expired node's mail is not resurrected: send to a node, let it expire, stop,
-  start, rejoin with the ring token — new node id, empty inbox.
-- `max_inbox` clamp on rebuild (small `max_inbox` in opts).
-- History-disabled config keeps today's behavior.
-- `examples/pi_smoke.exs` ("automatic replies after server restart") should
-  pass unchanged — if it starts failing it is signal, not noise: it means the
-  smoke depended on restart-drops.
+- A dedicated pending-messages table or any new persistence.
+- Expiry tombstones in `collected_json` and per-message delivery states in
+  the LiveView — this plan makes them cheap later, but they are a separate
+  feature.
+- Any client, protocol, or error-code change (this is invisible to clients
+  except that mail stops vanishing).
+
+## Acceptance criteria
+
+All in `persistence_test.exs` unless noted:
+
+1. Send → stop hub → start hub on the same files → the recipient's `receive`
+   returns the message exactly once, and `list_nodes` inbox metadata shows it
+   pending (correct count and `next_message_id`) before collection.
+2. A message collected before the restart is not redelivered after it.
+3. Expired mail is not resurrected: send to a node, let it expire, restart,
+   rejoin with the ring token — new node id, empty inbox.
+4. FIFO order survives a restart (send two, restart, receive returns both in
+   order).
+5. With `history_file: nil`, restart behavior is exactly today's (empty
+   inboxes).
+6. A small `max_inbox` in opts clamps the rebuild to the oldest messages.
+7. `examples/pi_smoke.exs` ("automatic replies after server restart") passes
+   unchanged — if it fails, it depended on restart-drops and that is signal.
+8. `mix test`, all Node suites, and all three smokes pass; existing
+   assertions change only where they encoded restart-clears-inboxes.
 
 ## Risks
 
-- **Hidden test/consumer assumptions** that restart implies empty inboxes
-  (persistence tests, possibly the Pi smoke). The work is mostly auditing
-  those expectations; the mechanism itself is ~20 lines.
-- **`received_by` vs `collected_json` fidelity**: `decode_rows/1` derives
-  `received_by` from `collected_json`, which is the durable truth — the
-  in-memory-only `received_by` updates on the live path are a superset. No gap
-  identified, but the persistence test matrix above is designed to catch one.
-- **Interaction with the long-poll plan** (`docs/plan-long-poll.md`): none —
-  waiters are in-memory and die with the hub; restored pending mail satisfies
-  the first `list_nodes` after restart immediately.
-
-## Follow-up this unlocks
-
-Per-message delivery states (`queued → collected / expired`) in the operator
-LiveView become cheap once the archive is the source of truth for pending
-mail; expiry would then write a tombstone into `collected_json` (e.g.
-`"expired:<timestamp>"`) instead of discarding silently. Out of scope here.
+- Hidden assumptions that restart implies empty inboxes (persistence tests,
+  possibly the Pi smoke) — most of the real work is this audit; the mechanism
+  is small.
+- `received_by` fidelity: `decode_rows/1` derives it from `collected_json`,
+  the durable truth; the live path only adds to it. No gap identified;
+  criteria 1–2 are designed to catch one.
+- Interaction with `docs/plan-long-poll.md`: none — waiters are in-memory and
+  die with the hub; restored pending mail satisfies the first post-restart
+  `list_nodes` immediately.
