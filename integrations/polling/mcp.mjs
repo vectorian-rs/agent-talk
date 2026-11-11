@@ -26,16 +26,20 @@ export async function readMembership(file) {
   return member;
 }
 
+export function validateServerUrl(url) {
+  let parsed;
+  try { parsed = new URL(url); } catch {
+    throw new ClientError("configuration", "Use an HTTP(S) MCP URL without embedded credentials.");
+  }
+  if (!["http:", "https:"].includes(parsed.protocol) || parsed.username || parsed.password) {
+    throw new ClientError("configuration", "Use an HTTP(S) MCP URL without embedded credentials.");
+  }
+  return parsed.href;
+}
+
 export class McpClient {
   constructor(url, { fetch: fetchImpl = globalThis.fetch } = {}) {
-    let parsed;
-    try { parsed = new URL(url); } catch {
-      throw new ClientError("configuration", "Use an HTTP(S) MCP URL without embedded credentials.");
-    }
-    if (!["http:", "https:"].includes(parsed.protocol) || parsed.username || parsed.password) {
-      throw new ClientError("configuration", "Use an HTTP(S) MCP URL without embedded credentials.");
-    }
-    this.url = parsed.href;
+    this.url = validateServerUrl(url);
     this.fetch = fetchImpl;
     this.id = 0;
     this.version = "2025-11-25";

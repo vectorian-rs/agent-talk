@@ -28,8 +28,7 @@ defmodule AgentTalk.Web.MessageText do
 
     unmatched_closing =
       Enum.any?([{")", "("}, {"]", "["}], fn {closing, opening} ->
-        last == closing and
-          length(String.split(text, closing)) > length(String.split(text, opening))
+        last == closing and count(text, closing) > count(text, opening)
       end)
 
     if last in [".", ",", ";", "!", "?"] or unmatched_closing do
@@ -38,4 +37,6 @@ defmodule AgentTalk.Web.MessageText do
       text
     end
   end
+
+  defp count(text, pattern), do: length(:binary.matches(text, pattern))
 end

@@ -45,6 +45,26 @@ test("inbox checks announce the caller's display labels without changing authent
   f.watcher.stop();
 });
 
+test("labels confirmed at registration override host-derived fallback labels", async () => {
+  const f = fixture();
+  f.state.member = { ...f.state.member, project: "hiko", name: "hiko / w-1" };
+  f.watcher.labels = { project: "directory-name", name: "directory-name / w-1" };
+  await f.watcher.start();
+  assert.equal(f.calls[0].args.project, "hiko");
+  assert.equal(f.calls[0].args.name, "hiko / w-1");
+  f.watcher.stop();
+});
+
+test("a server-echoed node_id name is not a label and keeps the host fallback", async () => {
+  const f = fixture();
+  f.state.member = { ...f.state.member, project: null, name: f.state.member.node_id };
+  f.watcher.labels = { project: "directory-name", name: "directory-name / w-1" };
+  await f.watcher.start();
+  assert.equal(f.calls[0].args.project, "directory-name");
+  assert.equal(f.calls[0].args.name, "directory-name / w-1");
+  f.watcher.stop();
+});
+
 test("one outstanding wake, then new mail is picked up after the busy agent settles", async () => {
   const f = fixture();
   f.state.inbox = { pending_messages: 1, next_message_id: "m-1" };

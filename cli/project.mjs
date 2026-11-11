@@ -1,8 +1,8 @@
-import { readFile, writeFile, mkdir, chmod, open, rename, rm } from "node:fs/promises";
+import { access, readFile, writeFile, mkdir, chmod, open, rename, rm } from "node:fs/promises";
 import { basename, join } from "node:path";
 import { randomBytes } from "node:crypto";
 import { parse, stringify } from "smol-toml";
-import { ClientError, McpClient, readMembership } from "../integrations/polling/mcp.mjs";
+import { ClientError, McpClient, readMembership, validateServerUrl } from "../integrations/polling/mcp.mjs";
 
 const keys = ["server", "client", "project", "team", "workers"];
 const error = (message) => new ClientError("configuration", message);
@@ -10,8 +10,9 @@ const error = (message) => new ClientError("configuration", message);
 export function validate(config) {
   const unknown = Object.keys(config).filter((key) => !keys.includes(key));
   if (unknown.length) throw error("Unknown settings in agent-talk.toml: " + unknown.join(", "));
-  new McpClient(config.server);
+  validateServerUrl(config.server);
   if (config.client !== "pi") throw error("This draft supports client = pi only.");
+  // 122 = the server's 128-character label limit minus the " / w-N" display-name suffix.
   if (typeof config.project !== "string" || !config.project.trim() || config.project.length > 122 || /[\u0000-\u001f\u007f-\u009f]/u.test(config.project)) {
     throw error("project must be a nonempty label of at most 122 characters without control characters.");
   }
@@ -73,19 +74,22 @@ async function prepare(root, config) {
 export async function initProject(root, options = {}) {
   const file = join(root, "agent-talk.toml");
   let config;
-  try { await readFile(file); config = await loadProject(root); }
+  try { await access(file); }
   catch (e) {
     if (e.code !== "ENOENT") throw e;
     config = validate({ server: options.server ?? "http://127.0.0.1:4000/mcp", client: options.client ?? "pi",
       project: basename(root), team: "delivery", workers: Number(options.workers ?? 2) });
     await writeFile(file, stringify(config), { flag: "wx" });
   }
+  if (!config) config = await loadProject(root);
   await prepare(root, config);
   return config;
 }
 
+
 export const stateDir = (root, config) => join(root, ".agent-talk", config.team);
 export const memberFile = (root, config, label) => join(stateDir(root, config), label + ".json");
+export const labels = (config) => ["pm", ...Array.from({ length: config.workers }, (_, n) => "w-" + (n + 1))];
 
 export async function connect(server) {
   const client = new McpClient(server);
@@ -99,8 +103,7 @@ export async function connect(server) {
 }
 
 export async function provision(root, config, label, client) {
-  const labels = ["pm", ...Array.from({ length: config.workers }, (_, n) => "w-" + (n + 1))];
-  if (!labels.includes(label)) throw error("Choose pm or a configured worker label.");
+  if (!labels(config).includes(label)) throw error("Choose pm or a configured worker label.");
   await prepare(root, config);
   const role = label === "pm" ? "pm" : "worker", file = memberFile(root, config, label);
   let invitation;

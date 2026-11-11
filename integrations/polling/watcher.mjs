@@ -5,11 +5,31 @@ import { ClientError } from "./mcp.mjs";
 export class InboxWatcher {
   constructor({ client, loadMembership, wake, status = () => {}, intervalMs = 10_000,
     setTimer = setTimeout, clearTimer = clearTimeout, labels = {} }) {
-    Object.assign(this, { client, loadMembership, wake, status, intervalMs, setTimer, clearTimer, labels });
-    this.failures = 0;
-    this.pollIntervalMs = intervalMs;
-    this.paused = false;
+    this.client = client;
+    this.loadMembership = loadMembership;
+    this.wake = wake;
+    this.status = status;
+    this.intervalMs = intervalMs;
+    this.setTimer = setTimer;
+    this.clearTimer = clearTimer;
+    this.labels = labels;
     this.controller = new AbortController();
+    // Mutable poll state.
+    this.running = false;
+    this.paused = false;
+    this.waitingForMembership = false;
+    this.notified = false;
+    this.authNotified = false;
+    this.failures = 0;
+    this.attempts = 0;
+    this.pollIntervalMs = intervalMs;
+    this.identity = undefined;
+    this.head = undefined;
+    this.inFlight = undefined;
+    this.timer = undefined;
+    this.lastStatus = undefined;
+    this.lastCheck = undefined;
+    this.lastWake = undefined;
   }
 
   start() {
@@ -75,8 +95,17 @@ export class InboxWatcher {
         this.notified = false;
         this.authNotified = false;
       }
+      // Registration-confirmed labels are authoritative; renewals must not
+      // drift from them. this.labels only covers memberships saved without
+      // labels, where the server echoes node_id as the name — not a label.
+      const text = (value) => typeof value === "string" && value.length > 0;
+      const labels = {
+        ...this.labels,
+        ...(text(member.project) ? { project: member.project } : {}),
+        ...(text(member.name) && member.name !== member.node_id ? { name: member.name } : {}),
+      };
       const result = await this.client.call("list_nodes",
-        { ...this.labels, node_id: member.node_id, token: member.token }, this.controller.signal);
+        { ...labels, node_id: member.node_id, token: member.token }, this.controller.signal);
       if (!this.running) return;
       const inbox = result.inbox;
       if (result.ring_id !== member.ring_id || !Number.isInteger(inbox?.pending_messages) ||

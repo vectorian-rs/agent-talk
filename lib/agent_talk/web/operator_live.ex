@@ -2,6 +2,7 @@ defmodule AgentTalk.Web.OperatorLive do
   use Phoenix.LiveView, layout: false
 
   alias AgentTalk.Hub
+  alias AgentTalk.Web.MessageText
 
   @impl true
   def mount(_params, _session, socket) do
@@ -35,38 +36,27 @@ defmodule AgentTalk.Web.OperatorLive do
     previous = socket.assigns[:ring]
 
     ring =
-      if Enum.any?(rings, &(&1.id == previous)) do
-        previous
-      else
-        case List.first(rings) do
-          nil -> nil
-          first -> first.id
-        end
-      end
+      if Enum.any?(rings, &(&1.id == previous)),
+        do: previous,
+        else: Enum.find_value(rings, & &1.id)
 
     socket
-    |> assign(
-      snapshot: snapshot,
-      rings: rings,
-      ring: ring,
-      history_limit: snapshot.history_limit,
-      history_persistent: snapshot.history_persistent
-    )
+    |> assign(snapshot: snapshot, rings: rings, ring: ring)
     |> scope_ring()
   end
 
   defp ring_options(snapshot) do
-    (Enum.map(snapshot.nodes, & &1.ring_id) ++ Enum.map(snapshot.messages, & &1.ring_id))
+    nodes_by_ring = Enum.group_by(snapshot.nodes, & &1.ring_id)
+    messages_by_ring = Enum.group_by(snapshot.messages, & &1.ring_id)
+
+    (Map.keys(nodes_by_ring) ++ Map.keys(messages_by_ring))
     |> Enum.uniq()
     |> Enum.map(fn id ->
-      nodes =
-        snapshot.nodes |> Enum.filter(&(&1.ring_id == id)) |> Enum.sort_by(&(&1.role != "pm"))
+      nodes = nodes_by_ring |> Map.get(id, []) |> Enum.sort_by(&(&1.role != "pm"))
 
       project =
-        Enum.find_value(nodes, &Map.get(&1, :project)) ||
-          Enum.find_value(snapshot.messages, fn event ->
-            if event.ring_id == id, do: Map.get(event, :project)
-          end)
+        Enum.find_value(nodes, & &1.project) ||
+          Enum.find_value(Map.get(messages_by_ring, id, []), & &1.project)
 
       %{id: id, label: if(project, do: "#{project} · #{id}", else: id)}
     end)
@@ -80,25 +70,31 @@ defmodule AgentTalk.Web.OperatorLive do
     nodes =
       snapshot.nodes
       |> Enum.filter(&(&1.ring_id == ring))
-      |> Enum.sort_by(&{&1.role != "pm", Map.get(&1, :name) || &1.node_id, &1.node_id})
+      |> Enum.sort_by(&{&1.role != "pm", &1.name, &1.node_id})
 
     messages = Enum.filter(snapshot.messages, &(&1.ring_id == ring))
+
+    # Message text is immutable once sent; parse links once per message id.
+    # Keyed over the whole snapshot so switching rings keeps cached entries.
+    cache = socket.assigns[:parts] || %{}
+    parts = Map.new(snapshot.messages, &{&1.id, cache[&1.id] || MessageText.parts(&1.message)})
 
     labels =
       messages
       |> Enum.reverse()
       |> Enum.reduce(%{}, fn event, labels ->
         labels
-        |> Map.put(event.from, Map.get(event, :from_name, event.from))
-        |> Map.merge(Map.get(event, :to_names, %{}))
+        |> Map.put(event.from, event.from_name)
+        |> Map.merge(event.to_names)
       end)
-      |> Map.merge(Map.new(nodes, &{&1.node_id, Map.get(&1, :name) || &1.node_id}))
+      |> Map.merge(Map.new(nodes, &{&1.node_id, &1.name}))
 
     socket
     |> assign(
       nodes: nodes,
       messages: messages,
       labels: labels,
+      parts: parts,
       parties: Enum.sort_by(Map.keys(labels), &{labels[&1], &1})
     )
     |> filter_messages()
@@ -178,7 +174,7 @@ defmodule AgentTalk.Web.OperatorLive do
           </div>
           <dl class="console-stats">
             <div><dt>Active registrations</dt><dd id="agent-count">{length(@nodes)}</dd></div>
-            <div><dt>Messages retained</dt><dd><span id="message-count">{length(@messages)}</span><span class="stat-limit"> / {@history_limit}</span></dd></div>
+            <div><dt>Messages retained</dt><dd><span id="message-count">{length(@messages)}</span><span class="stat-limit"> / {@snapshot.history_limit}</span></dd></div>
           </dl>
         </section>
 
@@ -191,7 +187,7 @@ defmodule AgentTalk.Web.OperatorLive do
                 <option :for={ring <- @rings} value={ring.id} selected={@ring == ring.id}>{ring.label}</option>
               </select>
             </form>
-            <form :if={@history_persistent} id="history-export" class="history-export" action="/history/export" method="get">
+            <form :if={@snapshot.history_persistent} id="history-export" class="history-export" action="/history/export" method="get">
               <label for="history-date" class="small-label">Conversation archive · UTC</label>
               <input id="history-date" name="date" type="date" value={@review_date} required />
               <select name="ring" aria-label="Archive ring scope">
@@ -233,7 +229,7 @@ defmodule AgentTalk.Web.OperatorLive do
           <section class="messages-panel" aria-labelledby="messages-title">
             <div class="panel-heading messages-heading">
               <div><h2 id="messages-title">Message log</h2><p class="stream-caption">Newest first · UTC</p></div>
-              <span class="small-label retention-label">Last {@history_limit}</span>
+              <span class="small-label retention-label">Last {@snapshot.history_limit}</span>
             </div>
             <form id="message-filters" phx-change="filter" class="message-filters" role="search" aria-label="Filter messages">
               <label class="search-field">
@@ -269,7 +265,7 @@ defmodule AgentTalk.Web.OperatorLive do
                   </div>
                   <time datetime={event.sent_at}>{clock(event.sent_at)}</time>
                 </div>
-                <p class="message-body"><%= for part <- AgentTalk.Web.MessageText.parts(event.message) do %><a :if={part.url} href={part.url} target="_blank" rel="noopener noreferrer">{part.text}</a>{if is_nil(part.url), do: part.text}<% end %></p>
+                <p class="message-body"><%= for part <- @parts[event.id] do %><a :if={part.url} href={part.url} target="_blank" rel="noopener noreferrer">{part.text}</a>{if is_nil(part.url), do: part.text}<% end %></p>
                 <div class="message-footer">
                   <span class="small-label message-kind">{event.ring_id} · {if length(event.to) > 1, do: "Broadcast · #{length(event.to)} recipients", else: "Direct message"}</span>
                   <span class={["delivery-status", event.received_by != [] && "delivery-collected"]} title="Collected means a recipient fetched the message from its inbox.">
@@ -281,7 +277,7 @@ defmodule AgentTalk.Web.OperatorLive do
             <p :if={@messages != []} class="stream-end">Showing {length(@visible_messages)} of {length(@messages)} retained messages.</p>
           </section>
         </div>
-        <footer class="operator-footer"><span>AgentTalk</span><span>{if @history_persistent, do: "Archive: SQLite", else: "Log: memory only"} · live window: {@history_limit}</span></footer>
+        <footer class="operator-footer"><span>AgentTalk</span><span>{if @snapshot.history_persistent, do: "Archive: SQLite", else: "Log: memory only"} · live window: {@snapshot.history_limit}</span></footer>
       </main>
     </div>
     """

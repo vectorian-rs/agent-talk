@@ -3,6 +3,8 @@ defmodule AgentTalk.MembershipStore do
 
   @node_fields [:node_id, :role, :ring_id, :token, :project, :name, :last_seen]
 
+  def node_fields, do: @node_fields
+
   def load(nil), do: {:ok, %{nodes: %{}, rings: %{}, next_id: 0}}
 
   def load(file) do

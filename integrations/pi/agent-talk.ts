@@ -10,10 +10,13 @@ function validFile(file: unknown): file is string {
   return typeof file === "string" && /\.json$/i.test(file) && !/[\r\n\0]/.test(file);
 }
 
+const truncate = (text: string, limit: number) => [...text].slice(0, limit).join("");
+
 export default function agentTalk(pi: ExtensionAPI) {
+  const offStatus = "AgentTalk automatic inbox off";
   let watcher: InboxWatcher | undefined;
   let settings: Settings | undefined;
-  let statusMessage = "AgentTalk automatic inbox off";
+  let statusMessage = offStatus;
 
   pi.registerFlag("agent-talk-membership", {
     type: "string", description: "This session's saved AgentTalk registration JSON file",
@@ -44,10 +47,13 @@ export default function agentTalk(pi: ExtensionAPI) {
       }
       return;
     }
-    const project = basename(ctx.cwd);
+    // Fallback for memberships saved without labels; the watcher prefers the
+    // labels confirmed at registration. 122 = the server's 128-character label
+    // limit minus the " / w-N" suffix (matching cli/project.mjs).
+    const project = truncate(basename(ctx.cwd), 122);
     watcher = new InboxWatcher({
       client,
-      labels: { project, name: project + " / " + basename(file, ".json") },
+      labels: { project, name: truncate(project + " / " + basename(file, ".json"), 128) },
       loadMembership: () => readMembership(file),
       wake: (event: { kind: string; node_id?: string; pending_messages?: number }) => {
         const content = event.kind === "recovery" ?
@@ -81,7 +87,7 @@ export default function agentTalk(pi: ExtensionAPI) {
   pi.on("session_start", async (event, ctx) => {
     stop();
     settings = undefined;
-    statusMessage = "AgentTalk automatic inbox off";
+    statusMessage = offStatus;
     if (ctx.hasUI) ctx.ui.setStatus("agent-talk", undefined);
     const session = ctx.sessionManager.getSessionId();
     // Do not silently attach a new or forked session to its parent's membership.
@@ -133,7 +139,7 @@ export default function agentTalk(pi: ExtensionAPI) {
       }
       if (match[1] === "off") {
         stop();
-        statusMessage = "AgentTalk automatic inbox off";
+        statusMessage = offStatus;
         if (settings) {
           settings = { ...settings, enabled: false };
           pi.appendEntry(settingsType, settings);

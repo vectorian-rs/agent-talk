@@ -3,6 +3,11 @@ defmodule AgentTalk.Hub do
   use GenServer
   alias AgentTalk.{History, MembershipStore}
 
+  # These exact strings are matched by Node clients (integrations/polling/mcp.mjs).
+  @labels_error "project and name must be nonempty labels of at most 128 characters without control characters"
+  @missing_node_error "node is not registered or has expired; join again with role and ring_token"
+  @invalid_token_error "invalid node token"
+
   def start_link(opts) do
     GenServer.start_link(__MODULE__, opts, name: Keyword.get(opts, :name, __MODULE__))
   end
@@ -17,7 +22,6 @@ defmodule AgentTalk.Hub do
   @impl true
   def init(opts) do
     Process.flag(:trap_exit, true)
-    Process.send_after(self(), :sweep, 1000)
 
     state =
       %{
@@ -41,27 +45,23 @@ defmodule AgentTalk.Hub do
         wall_clock: Keyword.get(opts, :wall_clock, fn -> System.system_time(:millisecond) end)
       }
 
+    Process.send_after(self(), :sweep, sweep_interval(state))
+    now = state.clock.()
+
     with {:ok, saved} <- MembershipStore.load(state.membership_file),
          {:ok, db} <- History.open(state.history_file) do
-      now = state.clock.()
-      wall_now = state.wall_clock.()
-
-      nodes =
-        Map.new(saved.nodes, fn {id, node} ->
-          {:ok, last_seen, _offset} = DateTime.from_iso8601(node.last_seen)
-          elapsed = max(0, wall_now - DateTime.to_unix(last_seen, :millisecond))
-          {id, Map.merge(node, %{inbox: :queue.new(), seen_at: now - elapsed})}
-        end)
-
       result =
         with {:ok, messages} <- History.recent(db, state.history_limit),
              {:ok, counter} <- History.last_counter(db) do
           restored =
             state
-            |> Map.merge(%{saved | nodes: nodes, next_id: max(saved.next_id, counter)})
-            |> expire_nodes(now)
+            |> restore(saved, now)
+            |> Map.merge(%{
+              next_id: max(saved.next_id, counter),
+              messages: messages,
+              history_db: db
+            })
 
-          restored = Map.merge(restored, %{messages: messages, history_db: db})
           with :ok <- MembershipStore.save(state.membership_file, restored), do: {:ok, restored}
         end
 
@@ -78,26 +78,42 @@ defmodule AgentTalk.Hub do
     end
   end
 
+  defp restore(state, saved, now) do
+    wall_now = state.wall_clock.()
+
+    nodes =
+      Map.new(saved.nodes, fn {id, node} ->
+        {:ok, last_seen, _offset} = DateTime.from_iso8601(node.last_seen)
+        elapsed = max(0, wall_now - DateTime.to_unix(last_seen, :millisecond))
+        {id, Map.merge(node, %{inbox: :queue.new(), seen_at: now - elapsed})}
+      end)
+
+    state
+    |> Map.merge(%{saved | nodes: nodes})
+    |> Map.merge(%{presence_dirty: false, presence_flushed_at: now})
+    |> expire_nodes(now)
+  end
+
   @impl true
   def handle_call(request, _from, state) do
     now = state.clock.()
     {reply, updated} = dispatch(request, expire_nodes(state, now), now)
 
-    case persist(state, updated) do
-      :ok ->
+    case persist(state, updated, now) do
+      {:ok, persisted} ->
         case History.record(
                Map.get(state, :history_db),
                request,
                reply,
-               updated,
-               timestamp(updated)
+               persisted,
+               timestamp(persisted)
              ) do
           :ok ->
-            notify_if_changed(state, updated)
-            {:reply, reply, updated}
+            notify_if_changed(state, persisted)
+            {:reply, reply, persisted}
 
           {:error, _} ->
-            retained = restore_mailboxes(state, updated)
+            retained = restore_mailboxes(state, persisted)
             notify_if_changed(state, retained)
 
             {:reply,
@@ -116,18 +132,22 @@ defmodule AgentTalk.Hub do
 
   @impl true
   def handle_info(:sweep, state) do
-    updated = expire_nodes(state, state.clock.())
-    Process.send_after(self(), :sweep, 1000)
+    now = state.clock.()
+    updated = expire_nodes(state, now)
+    Process.send_after(self(), :sweep, sweep_interval(state))
 
-    case persist(state, updated) do
-      :ok ->
-        notify_if_changed(state, updated)
-        {:noreply, updated}
+    case persist(state, updated, now) do
+      {:ok, persisted} ->
+        notify_if_changed(state, persisted)
+        {:noreply, persisted}
 
       {:error, _} ->
         {:noreply, state}
     end
   end
+
+  # Expiry is also enforced on every call; the timer only covers idle servers.
+  defp sweep_interval(state), do: state.ttl_ms |> div(20) |> min(60_000) |> max(1000)
 
   defp dispatch(:snapshot, state, _now) do
     pending =
@@ -169,9 +189,7 @@ defmodule AgentTalk.Hub do
         {{:error, "role all is reserved for broadcasts"}, state}
 
       not valid_labels?(args) ->
-        {{:error,
-          "project and name must be nonempty labels of at most 128 characters without control characters"},
-         state}
+        {{:error, @labels_error}, state}
 
       id == nil and token == nil ->
         join_ring(args, state, now)
@@ -181,34 +199,7 @@ defmodule AgentTalk.Hub do
          state}
 
       true ->
-        case state.nodes[id] do
-          nil ->
-            {{:error,
-              "node is not registered or has expired; join again with role and ring_token"},
-             state}
-
-          node ->
-            cond do
-              token != node.token ->
-                {{:error, "invalid node token"}, state}
-
-              role != node.role ->
-                {{:error, "renewal cannot change role"}, state}
-
-              Map.get(args, :ring_token) != nil and
-                  args.ring_token != state.rings[node.ring_id] ->
-                {{:error, "ring_token does not match this node's ring"}, state}
-
-              true ->
-                node =
-                  node
-                  |> Map.merge(Map.take(args, [:project, :name]))
-                  |> Map.merge(%{seen_at: now, last_seen: timestamp(state)})
-
-                updated = put_in(state.nodes[id], node)
-                {{:ok, registration(node, updated)}, updated}
-            end
-        end
+        renew_node(args, state, now)
     end
   end
 
@@ -218,9 +209,7 @@ defmodule AgentTalk.Hub do
 
       cond do
         not valid_labels?(args) ->
-          {{:error,
-            "project and name must be nonempty labels of at most 128 characters without control characters"},
-           updated}
+          {{:error, @labels_error}, updated}
 
         role != nil and not valid_id?(role) ->
           {{:error, "invalid role filter"}, updated}
@@ -255,6 +244,35 @@ defmodule AgentTalk.Hub do
     case authenticate(args, state, now) do
       {:ok, node, updated} -> communicate(args, updated, node)
       {:error, _} = error -> {error, state}
+    end
+  end
+
+  defp renew_node(args, state, now) do
+    case state.nodes[args.node_id] do
+      nil ->
+        {{:error, @missing_node_error}, state}
+
+      node ->
+        cond do
+          args.token != node.token ->
+            {{:error, @invalid_token_error}, state}
+
+          args.role != node.role ->
+            {{:error, "renewal cannot change role"}, state}
+
+          Map.get(args, :ring_token) != nil and
+              args.ring_token != state.rings[node.ring_id] ->
+            {{:error, "ring_token does not match this node's ring"}, state}
+
+          true ->
+            node =
+              node
+              |> Map.merge(Map.take(args, [:project, :name]))
+              |> Map.merge(%{seen_at: now, last_seen: timestamp(state)})
+
+            updated = put_in(state.nodes[node.node_id], node)
+            {{:ok, registration(node, updated)}, updated}
+        end
     end
   end
 
@@ -329,7 +347,7 @@ defmodule AgentTalk.Hub do
   defp authenticate(args, state, now) do
     case state.nodes[Map.get(args, :node_id)] do
       nil ->
-        {:error, "node is not registered or has expired; join again with role and ring_token"}
+        {:error, @missing_node_error}
 
       node ->
         if Map.get(args, :token) == node.token do
@@ -338,30 +356,35 @@ defmodule AgentTalk.Hub do
 
           {:ok, node, updated}
         else
-          {:error, "invalid node token"}
+          {:error, @invalid_token_error}
         end
     end
   end
 
   defp communicate(%{action: "receive"} = args, state, node) do
-    if Map.get(args, :to) != nil or Map.get(args, :to_role) != nil or
-         Map.get(args, :message) != nil do
-      {{:error, "receive takes no to, to_role or message fields"}, state}
-    else
-      messages = :queue.to_list(node.inbox)
-      received_ids = MapSet.new(messages, & &1.id)
+    cond do
+      Map.get(args, :to) != nil or Map.get(args, :to_role) != nil or
+          Map.get(args, :message) != nil ->
+        {{:error, "receive takes no to, to_role or message fields"}, state}
 
-      history =
-        Enum.map(state.messages, fn event ->
-          if MapSet.member?(received_ids, event.id) do
-            %{event | received_by: Enum.uniq([node.node_id | event.received_by])}
-          else
-            event
-          end
-        end)
+      :queue.is_empty(node.inbox) ->
+        {{:ok, %{messages: []}}, state}
 
-      updated = put_in(state.nodes[node.node_id].inbox, :queue.new())
-      {{:ok, %{messages: messages}}, %{updated | messages: history}}
+      true ->
+        messages = :queue.to_list(node.inbox)
+        received_ids = MapSet.new(messages, & &1.id)
+
+        history =
+          Enum.map(state.messages, fn event ->
+            if MapSet.member?(received_ids, event.id) do
+              %{event | received_by: Enum.uniq([node.node_id | event.received_by])}
+            else
+              event
+            end
+          end)
+
+        updated = put_in(state.nodes[node.node_id].inbox, :queue.new())
+        {{:ok, %{messages: messages}}, %{updated | messages: history}}
     end
   end
 
@@ -471,10 +494,8 @@ defmodule AgentTalk.Hub do
   defp node_name(node), do: Map.get(node, :name) || node.node_id
 
   defp allocate_id(prefix, state) do
-    counter =
-      max(Map.get(state, :next_id, 0) + 1, System.unique_integer([:positive, :monotonic]))
-
-    {"#{prefix}-#{counter}", Map.put(state, :next_id, counter)}
+    counter = max(state.next_id + 1, System.unique_integer([:positive, :monotonic]))
+    {"#{prefix}-#{counter}", %{state | next_id: counter}}
   end
 
   defp new_token do
@@ -482,17 +503,58 @@ defmodule AgentTalk.Hub do
   end
 
   defp timestamp(state) do
-    wall_clock = Map.get(state, :wall_clock, fn -> System.system_time(:millisecond) end)
-    wall_clock.() |> DateTime.from_unix!(:millisecond) |> DateTime.to_iso8601()
+    state.wall_clock.() |> DateTime.from_unix!(:millisecond) |> DateTime.to_iso8601()
   end
 
-  defp persist(previous, updated) do
-    if previous.nodes != updated.nodes or previous.rings != updated.rings or
-         Map.get(previous, :next_id) != Map.get(updated, :next_id) do
-      MembershipStore.save(Map.get(updated, :membership_file), updated)
-    else
-      :ok
+  @persisted_fields AgentTalk.MembershipStore.node_fields() -- [:last_seen]
+
+  # Writing the membership file on every heartbeat would fsync once per
+  # authenticated call, so presence-only changes (last_seen bumps) are flushed
+  # at most once per ttl/20; a restart loses at most that much lease activity.
+  defp persist(previous, updated, now) do
+    cond do
+      previous.rings != updated.rings or previous.next_id != updated.next_id ->
+        save_now(updated, now)
+
+      previous.nodes == updated.nodes ->
+        flush_presence(updated, now)
+
+      nodes_shape(previous.nodes) == nodes_shape(updated.nodes) ->
+        flush_presence(%{updated | presence_dirty: true}, now)
+
+      true ->
+        save_now(updated, now)
     end
+  end
+
+  defp flush_presence(%{presence_dirty: true} = state, now) do
+    if now - state.presence_flushed_at >= div(state.ttl_ms, 20) do
+      case save_now(state, now) do
+        {:ok, flushed} ->
+          {:ok, flushed}
+
+        # Presence loss within a flush window is tolerated by design, so a
+        # failed flush must not fail the caller's unrelated request; retry on
+        # the next window. Structural saves still surface their own errors.
+        {:error, _} ->
+          {:ok, %{state | presence_flushed_at: now}}
+      end
+    else
+      {:ok, state}
+    end
+  end
+
+  defp flush_presence(state, _now), do: {:ok, state}
+
+  defp save_now(state, now) do
+    case MembershipStore.save(state.membership_file, state) do
+      :ok -> {:ok, %{state | presence_dirty: false, presence_flushed_at: now}}
+      {:error, _} = error -> error
+    end
+  end
+
+  defp nodes_shape(nodes) do
+    Map.new(nodes, fn {id, node} -> {id, Map.take(node, @persisted_fields)} end)
   end
 
   defp restore_mailboxes(previous, updated) do

@@ -2,8 +2,9 @@
 import { parseArgs } from "node:util";
 import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
-import { initProject, loadProject, connect, provision } from "./project.mjs";
+import { initProject, loadProject, connect, provision, labels } from "./project.mjs";
 import { piArguments } from "./pi.mjs";
+import { ClientError } from "../integrations/polling/mcp.mjs";
 
 const help = "Draft: agent-talk init [--client pi] [--workers 4]\n       agent-talk start pm|w-1|w-2|w-3|w-4\nRun from your project root. Only the requested session is launched. Project instructions are owned by your client setup.";
 const quote = (value) => "'" + value.replaceAll("'", "'\\''") + "'";
@@ -17,7 +18,7 @@ try {
   else if (command === "init" && positionals.length === 1) {
     const config = await initProject(root, values);
     console.log(`Configured ${config.project}. Run each command in its own terminal, PM first:`);
-    for (const label of ["pm", ...Array.from({ length: config.workers }, (_, n) => "w-" + (n + 1))]) {
+    for (const label of labels(config)) {
       console.log(`cd ${quote(root)} && ${quote(process.execPath)} ${quote(fileURLToPath(import.meta.url))} start ${label}`);
     }
   } else if (command === "start" && positionals.length === 2 && Object.keys(values).length === 0) {
@@ -31,8 +32,9 @@ try {
     process.removeListener("SIGTERM", forward);
   } else throw new Error("usage");
 } catch (e) {
+  // ClientError messages are credential-free by design (see mcp.mjs); print them as-is.
   console.error(e.code === "transport" ? "AgentTalk is unavailable; check the configured server and rerun." :
-    e.code === "configuration" || ["expired", "token", "tool", "protocol", "session"].includes(e.code) ?
-    e.message : "AgentTalk command failed. Check the configuration and Pi installation.\n" + help);
+    e instanceof ClientError ? e.message :
+    "AgentTalk command failed. Check the configuration and Pi installation.\n" + help);
   process.exitCode = 1;
 }
