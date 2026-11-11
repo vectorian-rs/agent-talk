@@ -12,6 +12,7 @@ defmodule AgentTalk.ConfigTest do
       assert settings[:node_ttl_ms] == 86_400_000
       assert settings[:message_history_limit] == 50
       assert settings[:membership_file] == Path.expand("data/memberships.json")
+      assert settings[:history_file] == Path.expand("data/history.sqlite3")
     end
   end
 
@@ -35,9 +36,17 @@ defmodule AgentTalk.ConfigTest do
     assert settings[:membership_file] == Path.expand("../data/memberships.json", dir)
   end
 
-  test "membership paths resolve relative to the TOML file", %{tmp_dir: dir} do
-    settings = dir |> write_config(%{"membership_file" => "private/team.json"}) |> Config.load!()
+  test "storage paths resolve relative to the TOML file", %{tmp_dir: dir} do
+    settings =
+      dir
+      |> write_config(%{
+        "membership_file" => "private/team.json",
+        "history_file" => "private/messages.sqlite3"
+      })
+      |> Config.load!()
+
     assert settings[:membership_file] == Path.join(dir, "private/team.json")
+    assert settings[:history_file] == Path.join(dir, "private/messages.sqlite3")
   end
 
   test "browser origins can be set in TOML", %{tmp_dir: dir} do
@@ -59,6 +68,9 @@ defmodule AgentTalk.ConfigTest do
           %{"membership_file" => ""},
           %{"membership_file" => "  "},
           %{"membership_file" => 12},
+          %{"history_file" => ""},
+          %{"history_file" => "  "},
+          %{"history_file" => false},
           %{"allowed_origins" => "http://localhost:4000"},
           %{"allowed_origins" => [""]},
           %{"node_ttl_second" => 3600}

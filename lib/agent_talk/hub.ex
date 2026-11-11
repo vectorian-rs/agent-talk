@@ -1,7 +1,7 @@
 defmodule AgentTalk.Hub do
   @moduledoc "Serializes ring membership and fan-out into ephemeral, per-agent mailboxes."
   use GenServer
-  alias AgentTalk.MembershipStore
+  alias AgentTalk.{History, MembershipStore}
 
   def start_link(opts) do
     GenServer.start_link(__MODULE__, opts, name: Keyword.get(opts, :name, __MODULE__))
@@ -16,6 +16,7 @@ defmodule AgentTalk.Hub do
 
   @impl true
   def init(opts) do
+    Process.flag(:trap_exit, true)
     Process.send_after(self(), :sweep, 1000)
 
     state =
@@ -25,6 +26,7 @@ defmodule AgentTalk.Hub do
         next_id: 0,
         messages: [],
         membership_file: Keyword.get(opts, :membership_file),
+        history_file: Keyword.get(opts, :history_file),
         pubsub: Keyword.get(opts, :pubsub),
         ttl_ms:
           Keyword.get_lazy(opts, :ttl_ms, fn ->
@@ -39,7 +41,8 @@ defmodule AgentTalk.Hub do
         wall_clock: Keyword.get(opts, :wall_clock, fn -> System.system_time(:millisecond) end)
       }
 
-    with {:ok, saved} <- MembershipStore.load(state.membership_file) do
+    with {:ok, saved} <- MembershipStore.load(state.membership_file),
+         {:ok, db} <- History.open(state.history_file) do
       now = state.clock.()
       wall_now = state.wall_clock.()
 
@@ -50,14 +53,28 @@ defmodule AgentTalk.Hub do
           {id, Map.merge(node, %{inbox: :queue.new(), seen_at: now - elapsed})}
         end)
 
-      restored = state |> Map.merge(%{saved | nodes: nodes}) |> expire_nodes(now)
+      result =
+        with {:ok, messages} <- History.recent(db, state.history_limit),
+             {:ok, counter} <- History.last_counter(db) do
+          restored =
+            state
+            |> Map.merge(%{saved | nodes: nodes, next_id: max(saved.next_id, counter)})
+            |> expire_nodes(now)
 
-      case MembershipStore.save(state.membership_file, restored) do
-        :ok -> {:ok, restored}
-        {:error, _} -> {:stop, :membership_storage_unavailable}
+          restored = Map.merge(restored, %{messages: messages, history_db: db})
+          with :ok <- MembershipStore.save(state.membership_file, restored), do: {:ok, restored}
+        end
+
+      case result do
+        {:ok, restored} ->
+          {:ok, restored}
+
+        _ ->
+          History.close(db)
+          {:stop, :storage_unavailable}
       end
     else
-      {:error, _} -> {:stop, :membership_storage_unavailable}
+      {:error, _} -> {:stop, :storage_unavailable}
     end
   end
 
@@ -68,14 +85,34 @@ defmodule AgentTalk.Hub do
 
     case persist(state, updated) do
       :ok ->
-        notify_if_changed(state, updated)
-        {:reply, reply, updated}
+        case History.record(
+               Map.get(state, :history_db),
+               request,
+               reply,
+               updated,
+               timestamp(updated)
+             ) do
+          :ok ->
+            notify_if_changed(state, updated)
+            {:reply, reply, updated}
+
+          {:error, _} ->
+            retained = restore_mailboxes(state, updated)
+            notify_if_changed(state, retained)
+
+            {:reply,
+             {:error, "conversation archive unavailable; message operation was not applied"},
+             retained}
+        end
 
       {:error, _} ->
         {:reply, {:error, "membership storage unavailable; check the server's membership_file"},
          state}
     end
   end
+
+  @impl true
+  def terminate(_reason, state), do: History.close(Map.get(state, :history_db))
 
   @impl true
   def handle_info(:sweep, state) do
@@ -93,10 +130,27 @@ defmodule AgentTalk.Hub do
   end
 
   defp dispatch(:snapshot, state, _now) do
+    pending =
+      Map.new(state.nodes, fn {id, node} ->
+        {id, MapSet.new(:queue.to_list(node.inbox), & &1.id)}
+      end)
+
+    empty = MapSet.new()
+
+    messages =
+      Enum.map(state.messages, fn event ->
+        Map.put(
+          event,
+          :pending_to,
+          Enum.filter(event.to, &MapSet.member?(Map.get(pending, &1, empty), event.id))
+        )
+      end)
+
     data = %{
       nodes: public_nodes(state.nodes),
-      messages: state.messages,
-      history_limit: state.history_limit
+      messages: messages,
+      history_limit: state.history_limit,
+      history_persistent: not is_nil(Map.get(state, :history_db))
     }
 
     {{:ok, data}, state}
@@ -439,6 +493,15 @@ defmodule AgentTalk.Hub do
     else
       :ok
     end
+  end
+
+  defp restore_mailboxes(previous, updated) do
+    nodes =
+      Map.new(updated.nodes, fn {id, node} ->
+        {id, Map.put(node, :inbox, previous.nodes[id].inbox)}
+      end)
+
+    %{updated | nodes: nodes, messages: previous.messages}
   end
 
   defp ring_nodes(state, ring_id),

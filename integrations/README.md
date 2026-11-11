@@ -43,10 +43,11 @@ No replies to acknowledgments. Missing/expired membership invokes the project's
 recovery flow, preserving ring ownership and saving every successful response
 before the watcher can use it. Invalid invitations require operator intervention.
 
-Memberships persist locally; messages remain in memory. Receiving removes
-messages before the client response; message loss is possible on a failed receive,
-membership expiry or server restart. Automatic wake-up does not provide durable
-delivery. GitHub or the project's equivalent remains the work record.
+Memberships and conversation history persist locally; live inboxes remain in
+memory. SQLite records sends and collection times for daily review. Receiving
+removes messages before the client response; delivery can still be lost on a failed
+receive, membership expiry or server restart. The archive is not a replay queue.
+GitHub or the project's equivalent remains the work record.
 
 Run the Node tests and `mix run --no-start examples/pi_smoke.exs` from the repository
 root. The smoke starts an isolated broker and three real Pi runtimes using a

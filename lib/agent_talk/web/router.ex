@@ -3,6 +3,7 @@ defmodule AgentTalk.Web.Router do
   import Phoenix.LiveView.Router
 
   pipeline :browser do
+    plug(:fetch_query_params)
     plug(:accepts, ["html"])
     plug(:fetch_session)
     plug(:fetch_live_flash)
@@ -13,6 +14,7 @@ defmodule AgentTalk.Web.Router do
 
   scope "/" do
     pipe_through(:browser)
+    get("/history/export", AgentTalk.Web.HistoryController, :export)
     live("/", AgentTalk.Web.OperatorLive)
   end
 end

@@ -7,7 +7,7 @@ settings = AgentTalk.Config.load!(file)
 config :agent_talk, settings ++ [config_file: Path.expand(file)]
 
 if config_env() == :test do
-  config :agent_talk, membership_file: nil
+  config :agent_talk, membership_file: nil, history_file: nil
 end
 
 config :agent_talk, AgentTalk.Web.Endpoint,

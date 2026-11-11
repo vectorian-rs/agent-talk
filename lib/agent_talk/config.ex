@@ -1,7 +1,7 @@
 defmodule AgentTalk.Config do
   @moduledoc "Loads and validates server settings from a TOML file."
 
-  @keys ~w(port node_ttl_seconds message_history_limit allowed_origins membership_file)
+  @keys ~w(port node_ttl_seconds message_history_limit allowed_origins membership_file history_file)
 
   def path(argv, default) do
     {options, _rest, invalid} = OptionParser.parse(argv, strict: [config: :string])
@@ -26,9 +26,14 @@ defmodule AgentTalk.Config do
     ttl_seconds = positive_integer!(data, "node_ttl_seconds")
     history_limit = positive_integer!(data, "message_history_limit")
     membership_file = Map.get(data, "membership_file", "../data/memberships.json")
+    history_file = Map.get(data, "history_file", "../data/history.sqlite3")
 
     unless is_binary(membership_file) and String.trim(membership_file) != "" do
       raise ArgumentError, "membership_file must be a nonempty file path"
+    end
+
+    unless is_binary(history_file) and String.trim(history_file) != "" do
+      raise ArgumentError, "history_file must be a nonempty file path"
     end
 
     origins =
@@ -43,6 +48,7 @@ defmodule AgentTalk.Config do
       node_ttl_ms: ttl_seconds * 1000,
       message_history_limit: history_limit,
       membership_file: Path.expand(membership_file, Path.dirname(Path.expand(file))),
+      history_file: Path.expand(history_file, Path.dirname(Path.expand(file))),
       allowed_origins: origins
     ]
   end

@@ -170,7 +170,7 @@ try {
   await new Promise((resolve) => probe.close(resolve));
   url = "http://127.0.0.1:" + port + "/mcp";
   const config = join(directory, "server.toml");
-  await writeFile(config, 'port = ' + port + '\nnode_ttl_seconds = 86400\nmessage_history_limit = 50\nmembership_file = "memberships.json"\n');
+  await writeFile(config, 'port = ' + port + '\nnode_ttl_seconds = 86400\nmessage_history_limit = 50\nmembership_file = "memberships.json"\nhistory_file = "history.sqlite3"\n');
   await startBroker(config);
   await mkdir(join(directory, ".pi"));
   await writeFile(join(directory, ".pi/mcp.json"), JSON.stringify({

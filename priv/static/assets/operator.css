@@ -37,6 +37,10 @@
   .agents-panel { border-top: 1px solid var(--line); position: sticky; top: 1rem; }
   .message-body a { color: inherit; text-decoration: underline; text-underline-offset: .15em; }
   .ring-selector { display: grid; gap: .5rem; padding-top: 1rem; }
+  .history-export { display: grid; gap: .5rem; padding-top: 1rem; }
+  .history-export label { color: var(--muted); font-size: .65rem; }
+  .history-export input, .history-export select, .history-export button { min-width: 0; width: 100%; border: 1px solid var(--stroke); border-radius: 5px; padding: .55rem .65rem; background: var(--surface); color: var(--ink); font: .75rem var(--sans); }
+  .history-export button { cursor: pointer; }
   .ring-selector label { color: var(--muted); font-size: .65rem; }
   .ring-selector select { width: 100%; min-width: 0; border: 1px solid var(--stroke); border-radius: 5px; padding: .55rem .65rem; background: var(--surface); color: var(--ink); font: .75rem var(--sans); }
   .panel-heading { display: flex; justify-content: space-between; align-items: center; gap: 1rem; padding-block: 1.2rem; }
