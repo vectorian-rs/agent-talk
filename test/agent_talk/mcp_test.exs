@@ -156,6 +156,26 @@ defmodule AgentTalk.MCPTest do
     assert call(name, "communicate", auth(outsider, %{action: "receive"}))["messages"] == []
   end
 
+  test "tool errors carry machine-readable codes in structured content", %{url: url} do
+    name = AgentTalk.TestCodes
+    client(name, url)
+    pm = call(name, "register_node", %{role: "pm"})
+
+    for {args, code} <- [
+          {%{role: "worker", ring_token: "wrong"}, "invalid_ring_token"},
+          {%{role: "pm", node_id: pm["node_id"], token: "wrong"}, "invalid_token"},
+          {%{role: "pm", node_id: "node-999999", token: "wrong"}, "expired"},
+          {%{role: "pm", name: "\n"}, "invalid_labels"},
+          {%{role: "all"}, "invalid_request"}
+        ] do
+      assert {:ok, response} = Anubis.Client.call_tool(name, "register_node", args)
+      assert response.is_error
+      error = response.result["structuredContent"]["error"]
+      assert error["code"] == code
+      assert is_binary(error["message"]) and error["message"] != ""
+    end
+  end
+
   test "raw MCP initialization provides ring onboarding and exactly three tools", %{url: url} do
     response =
       post(url, %{

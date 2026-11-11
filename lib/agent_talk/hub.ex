@@ -3,7 +3,11 @@ defmodule AgentTalk.Hub do
   use GenServer
   alias AgentTalk.{History, MembershipStore}
 
-  # These exact strings are matched by Node clients (integrations/polling/mcp.mjs).
+  # Errors are {:error, code, message}: the code is the machine-readable
+  # contract (sent to clients in structuredContent.error.code by
+  # AgentTalk.tool_reply); the message is advisory prose, free to change.
+  # Codes: :invalid_request, :invalid_labels, :invalid_ring_token,
+  # :invalid_token, :expired, :inbox_full, :storage.
   @labels_error "project and name must be nonempty labels of at most 128 characters without control characters"
   @missing_node_error "node is not registered or has expired; join again with role and ring_token"
   @invalid_token_error "invalid node token"
@@ -117,12 +121,13 @@ defmodule AgentTalk.Hub do
             notify_if_changed(state, retained)
 
             {:reply,
-             {:error, "conversation archive unavailable; message operation was not applied"},
-             retained}
+             {:error, :storage,
+              "conversation archive unavailable; message operation was not applied"}, retained}
         end
 
       {:error, _} ->
-        {:reply, {:error, "membership storage unavailable; check the server's membership_file"},
+        {:reply,
+         {:error, :storage, "membership storage unavailable; check the server's membership_file"},
          state}
     end
   end
@@ -183,20 +188,21 @@ defmodule AgentTalk.Hub do
 
     cond do
       not valid_id?(role) ->
-        {{:error, "role must be 1..64 letters, digits, underscores, dots or hyphens"}, state}
+        {{:error, :invalid_request,
+          "role must be 1..64 letters, digits, underscores, dots or hyphens"}, state}
 
       role == "all" ->
-        {{:error, "role all is reserved for broadcasts"}, state}
+        {{:error, :invalid_request, "role all is reserved for broadcasts"}, state}
 
       not valid_labels?(args) ->
-        {{:error, @labels_error}, state}
+        {{:error, :invalid_labels, @labels_error}, state}
 
       id == nil and token == nil ->
         join_ring(args, state, now)
 
       id == nil or token == nil ->
-        {{:error, "renewal requires both node_id and token; a new join uses role and ring_token"},
-         state}
+        {{:error, :invalid_request,
+          "renewal requires both node_id and token; a new join uses role and ring_token"}, state}
 
       true ->
         renew_node(args, state, now)
@@ -209,10 +215,10 @@ defmodule AgentTalk.Hub do
 
       cond do
         not valid_labels?(args) ->
-          {{:error, @labels_error}, updated}
+          {{:error, :invalid_labels, @labels_error}, updated}
 
         role != nil and not valid_id?(role) ->
-          {{:error, "invalid role filter"}, updated}
+          {{:error, :invalid_request, "invalid role filter"}, updated}
 
         true ->
           updated =
@@ -236,33 +242,33 @@ defmodule AgentTalk.Hub do
           {{:ok, %{ring_id: caller.ring_id, nodes: nodes, inbox: inbox}}, updated}
       end
     else
-      {:error, _} = error -> {error, state}
+      {:error, _, _} = error -> {error, state}
     end
   end
 
   defp dispatch({:communicate, args}, state, now) do
     case authenticate(args, state, now) do
       {:ok, node, updated} -> communicate(args, updated, node)
-      {:error, _} = error -> {error, state}
+      {:error, _, _} = error -> {error, state}
     end
   end
 
   defp renew_node(args, state, now) do
     case state.nodes[args.node_id] do
       nil ->
-        {{:error, @missing_node_error}, state}
+        {{:error, :expired, @missing_node_error}, state}
 
       node ->
         cond do
           args.token != node.token ->
-            {{:error, @invalid_token_error}, state}
+            {{:error, :invalid_token, @invalid_token_error}, state}
 
           args.role != node.role ->
-            {{:error, "renewal cannot change role"}, state}
+            {{:error, :invalid_request, "renewal cannot change role"}, state}
 
           Map.get(args, :ring_token) != nil and
               args.ring_token != state.rings[node.ring_id] ->
-            {{:error, "ring_token does not match this node's ring"}, state}
+            {{:error, :invalid_ring_token, "ring_token does not match this node's ring"}, state}
 
           true ->
             node =
@@ -284,12 +290,13 @@ defmodule AgentTalk.Hub do
         add_node(args, ring_id, state, now)
 
       {_role, nil} ->
-        {{:error, "ring_token is required; ask the PM for an onboarding prompt"}, state}
+        {{:error, :invalid_request,
+          "ring_token is required; ask the PM for an onboarding prompt"}, state}
 
       {_role, ring_token} ->
         case Enum.find(state.rings, fn {_id, token} -> token == ring_token end) do
           {ring_id, _token} -> add_node(args, ring_id, state, now)
-          nil -> {{:error, "invalid ring token"}, state}
+          nil -> {{:error, :invalid_ring_token, "invalid ring token"}, state}
         end
     end
   end
@@ -347,7 +354,7 @@ defmodule AgentTalk.Hub do
   defp authenticate(args, state, now) do
     case state.nodes[Map.get(args, :node_id)] do
       nil ->
-        {:error, @missing_node_error}
+        {:error, :expired, @missing_node_error}
 
       node ->
         if Map.get(args, :token) == node.token do
@@ -356,7 +363,7 @@ defmodule AgentTalk.Hub do
 
           {:ok, node, updated}
         else
-          {:error, @invalid_token_error}
+          {:error, :invalid_token, @invalid_token_error}
         end
     end
   end
@@ -365,7 +372,7 @@ defmodule AgentTalk.Hub do
     cond do
       Map.get(args, :to) != nil or Map.get(args, :to_role) != nil or
           Map.get(args, :message) != nil ->
-        {{:error, "receive takes no to, to_role or message fields"}, state}
+        {{:error, :invalid_request, "receive takes no to, to_role or message fields"}, state}
 
       :queue.is_empty(node.inbox) ->
         {{:ok, %{messages: []}}, state}
@@ -422,7 +429,7 @@ defmodule AgentTalk.Hub do
       {{:ok, %{message_id: message.id, delivered_to: recipients}},
        %{state | nodes: nodes, messages: history}}
     else
-      {:error, _} = error -> {error, state}
+      {:error, _, _} = error -> {error, state}
     end
   end
 
@@ -432,7 +439,7 @@ defmodule AgentTalk.Hub do
 
     cond do
       to != nil and role != nil ->
-        {:error, "provide either to or to_role, not both"}
+        {:error, :invalid_request, "provide either to or to_role, not both"}
 
       is_list(to) and to != [] and Enum.all?(to, &valid_id?/1) ->
         ids = Enum.uniq(to)
@@ -440,7 +447,9 @@ defmodule AgentTalk.Hub do
 
         if missing == [],
           do: {:ok, ids},
-          else: {:error, "unknown or expired recipients: #{Enum.join(missing, ", ")}"}
+          else:
+            {:error, :invalid_request,
+             "unknown or expired recipients: #{Enum.join(missing, ", ")}"}
 
       to == nil and valid_id?(role) ->
         ids =
@@ -450,16 +459,18 @@ defmodule AgentTalk.Hub do
           |> Enum.map(& &1.node_id)
           |> Enum.sort()
 
-        if ids == [], do: {:error, "no matching recipients"}, else: {:ok, ids}
+        if ids == [],
+          do: {:error, :invalid_request, "no matching recipients"},
+          else: {:ok, ids}
 
       true ->
-        {:error, "send requires a nonempty to list or to_role (a role or all)"}
+        {:error, :invalid_request, "send requires a nonempty to list or to_role (a role or all)"}
     end
   end
 
   defp check_capacity(recipients, state) do
     if Enum.any?(recipients, &(:queue.len(state.nodes[&1].inbox) >= state.max_inbox)) do
-      {:error, "a recipient inbox is full; no messages were delivered"}
+      {:error, :inbox_full, "a recipient inbox is full; no messages were delivered"}
     else
       :ok
     end
@@ -468,10 +479,10 @@ defmodule AgentTalk.Hub do
   defp validate_message(message) when is_binary(message) do
     if String.trim(message) != "" and byte_size(message) <= 65_536,
       do: :ok,
-      else: {:error, "message must be nonempty and at most 65536 bytes"}
+      else: {:error, :invalid_request, "message must be nonempty and at most 65536 bytes"}
   end
 
-  defp validate_message(_), do: {:error, "message is required when sending"}
+  defp validate_message(_), do: {:error, :invalid_request, "message is required when sending"}
 
   defp valid_id?(id), do: is_binary(id) and Regex.match?(~r/\A[a-zA-Z0-9_.-]{1,64}\z/, id)
 

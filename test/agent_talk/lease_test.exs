@@ -65,7 +65,7 @@ defmodule AgentTalk.LeaseTest do
     worker = join(hub, pm)
     send_message(hub, pm, [worker.node_id], "Uncollected")
     at(clock, 1000)
-    assert {:error, @missing} = receive_messages(hub, worker)
+    assert {:error, :expired, @missing} = receive_messages(hub, worker)
     assert registration_error(Hub.register(worker, hub)) == @missing
     fresh = join(hub, pm)
     assert fresh.node_id != worker.node_id
@@ -73,8 +73,10 @@ defmodule AgentTalk.LeaseTest do
     fresh_credentials = fresh.token != worker.token
     assert fresh_credentials, "fresh identity needs its own private token"
     assert {:ok, %{messages: []}} = receive_messages(hub, fresh)
-    assert {:error, @missing} = receive_messages(hub, worker)
-    assert {:error, "invalid node token"} = receive_messages(hub, %{fresh | token: worker.token})
+    assert {:error, :expired, @missing} = receive_messages(hub, worker)
+
+    assert {:error, :invalid_token, "invalid node token"} =
+             receive_messages(hub, %{fresh | token: worker.token})
   end
 
   test "a lost node token cannot reclaim an active ID; an invitation only creates another identity",
@@ -86,16 +88,18 @@ defmodule AgentTalk.LeaseTest do
     assert fresh.node_id != worker.node_id
     assert fresh.ring_id == worker.ring_id
     assert present?(hub, worker.node_id)
-    assert {:error, "invalid node token"} = receive_messages(hub, %{worker | token: fresh.token})
+
+    assert {:error, :invalid_token, "invalid node token"} =
+             receive_messages(hub, %{worker | token: fresh.token})
   end
 
   test "invalid credentials do not extend a registration", %{hub: hub, clock: clock, pm: pm} do
     worker = join(hub, pm)
     at(clock, 999)
     stale = %{worker | token: "incorrect-token"}
-    assert {:error, "invalid node token"} = receive_messages(hub, stale)
+    assert {:error, :invalid_token, "invalid node token"} = receive_messages(hub, stale)
     assert registration_error(Hub.register(stale, hub)) == "invalid node token"
-    assert {:error, "invalid node token"} = Hub.list_nodes(auth(stale), hub)
+    assert {:error, :invalid_token, "invalid node token"} = Hub.list_nodes(auth(stale), hub)
     at(clock, 1000)
     refute present?(hub, worker.node_id)
   end
@@ -130,7 +134,7 @@ defmodule AgentTalk.LeaseTest do
   test "an authenticated send failure still renews the caller", %{hub: hub, clock: clock, pm: pm} do
     at(clock, 900)
 
-    assert {:error, "unknown or expired recipients: missing"} =
+    assert {:error, :invalid_request, "unknown or expired recipients: missing"} =
              send_message(hub, pm, ["missing"], "Task")
 
     at(clock, 1000)
@@ -151,7 +155,7 @@ defmodule AgentTalk.LeaseTest do
     assert recipient == worker.node_id
     at(clock, 1000)
     refute present?(hub, worker.node_id)
-    assert {:error, _} = send_message(hub, pm, [worker.node_id], "Too late")
+    assert {:error, _, _} = send_message(hub, pm, [worker.node_id], "Too late")
     fresh = join(hub, pm)
     assert {:ok, %{messages: []}} = receive_messages(hub, fresh)
     assert {:ok, %{messages: [%{id: ^id, received_by: []}]}} = Hub.snapshot(hub)
@@ -168,7 +172,7 @@ defmodule AgentTalk.LeaseTest do
     second = renew(hub, second)
     pm = renew(hub, pm)
     at(clock, 1000)
-    assert {:error, _} = send_message(hub, pm, [first.node_id, second.node_id], "Task")
+    assert {:error, _, _} = send_message(hub, pm, [first.node_id, second.node_id], "Task")
     assert {:ok, %{messages: []}} = receive_messages(hub, second)
     assert {:ok, %{messages: []}} = Hub.snapshot(hub)
   end
@@ -232,7 +236,7 @@ defmodule AgentTalk.LeaseTest do
 
   defp join(hub, pm), do: register(hub, %{role: "worker", ring_token: pm.ring_token})
   defp renew(hub, node), do: register(hub, Map.take(node, [:role, :node_id, :token]))
-  defp registration_error({:error, reason}), do: reason
+  defp registration_error({:error, _code, reason}), do: reason
   defp registration_error({:ok, _}), do: :unexpected_success
 
   defp present?(hub, id) do

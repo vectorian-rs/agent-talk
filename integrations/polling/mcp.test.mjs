@@ -91,6 +91,20 @@ test("tool authentication errors are classified without echoing response bodies"
     (error) => error.code === "token" && !error.message.includes("test-only-secret"));
 });
 
+test("tool errors are classified by the server's machine-readable code, not its prose", async () => {
+  for (const [code, expected] of [
+    ["expired", "expired"], ["invalid_token", "token"], ["invalid_labels", "tool"],
+  ]) {
+    const fake = transport((body) => Response.json({ id: body.id, result: {
+      isError: true,
+      structuredContent: { error: { code, message: "any reworded server text" } },
+      content: [{ type: "text", text: "any reworded server text" }],
+    } }));
+    await assert.rejects(new McpClient("http://127.0.0.1/mcp", fake).call("list_nodes", {}),
+      (error) => error.code === expected);
+  }
+});
+
 test("credentials are read privately, missing files wait, malformed registrations are rejected", async () => {
   const directory = await mkdtemp(join(tmpdir(), "agent-talk-membership-"));
   const file = join(directory, "worker.json");

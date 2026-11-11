@@ -129,7 +129,8 @@ defmodule AgentTalk.HistoryTest do
         "CREATE TRIGGER fail_send BEFORE INSERT ON messages BEGIN SELECT RAISE(ABORT, 'test failure'); END;"
       )
 
-    assert {:error, "conversation archive unavailable; message operation was not applied"} =
+    assert {:error, :storage,
+            "conversation archive unavailable; message operation was not applied"} =
              send_message(c, [c.worker.node_id], "Rejected")
 
     assert {:ok, %{messages: []}} = receive_messages(c.hub, c.worker)
@@ -144,7 +145,8 @@ defmodule AgentTalk.HistoryTest do
         "CREATE TRIGGER fail_receive BEFORE UPDATE ON messages WHEN OLD.message_id = '#{second}' BEGIN SELECT RAISE(ABORT, 'test failure'); END;"
       )
 
-    assert {:error, "conversation archive unavailable; message operation was not applied"} =
+    assert {:error, :storage,
+            "conversation archive unavailable; message operation was not applied"} =
              receive_messages(c.hub, c.worker)
 
     assert {:ok, archived} = History.daily(c.history_file, ~D[2026-11-10])

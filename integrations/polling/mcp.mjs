@@ -52,12 +52,15 @@ export class McpClient {
         await this.connect(signal);
         const result = await this.request("tools/call", { name, arguments: args }, signal);
         if (result.isError) {
+          // Branch on the server's machine-readable code; prose matching only
+          // remains as a fallback for servers that predate error codes.
+          const code = result.structuredContent?.error?.code;
           const text = (result.content ?? []).filter((item) => item.type === "text")
             .map((item) => item.text).join("\n");
-          if (text.includes("node is not registered or has expired")) {
+          if (code === "expired" || (!code && text.includes("node is not registered or has expired"))) {
             throw new ClientError("expired", "AgentTalk membership expired or the server restarted.");
           }
-          if (text.includes("invalid node token")) {
+          if (code === "invalid_token" || (!code && text.includes("invalid node token"))) {
             throw new ClientError("token", "AgentTalk rejected the saved private node token.");
           }
           throw new ClientError("tool", "AgentTalk rejected the request; response omitted.");

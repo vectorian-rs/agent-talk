@@ -50,7 +50,7 @@ defmodule AgentTalk.PersistenceTest do
     assert Enum.sort(Enum.map(nodes, & &1.node_id)) == Enum.sort([pm.node_id, worker.node_id])
     assert {:ok, %{messages: []}} = Hub.snapshot(hub)
 
-    assert {:error, "invalid node token"} =
+    assert {:error, :invalid_token, "invalid node token"} =
              Hub.list_nodes(%{node_id: worker.node_id, token: "incorrect"}, hub)
 
     newcomer = register(hub, %{role: "worker", ring_token: pm.ring_token})
@@ -71,11 +71,11 @@ defmodule AgentTalk.PersistenceTest do
     Agent.update(clock, &%{&1 | mono: -5000, wall: &1.wall + 1000})
     hub = start_hub(opts)
     assert {:ok, %{nodes: []}} = Hub.snapshot(hub)
-    assert {:error, @missing} = Hub.list_nodes(auth(pm), hub)
+    assert {:error, :expired, @missing} = Hub.list_nodes(auth(pm), hub)
     worker = register(hub, %{role: "worker", ring_token: pm.ring_token})
     assert worker.ring_id == pm.ring_id
     assert number(worker.node_id) > number(old_worker.node_id)
-    assert {:error, @missing} = Hub.list_nodes(auth(old_worker), hub)
+    assert {:error, :expired, @missing} = Hub.list_nodes(auth(old_worker), hub)
     stop_supervised!(:persistent_hub)
     advance(clock, 1000)
     hub = start_hub(opts)
@@ -128,9 +128,9 @@ defmodule AgentTalk.PersistenceTest do
     File.mkdir!(file)
     error = "membership storage unavailable; check the server's membership_file"
 
-    assert {:error, ^error} = Hub.register(%{role: "pm"}, hub)
+    assert {:error, :storage, ^error} = Hub.register(%{role: "pm"}, hub)
 
-    assert {:error, ^error} =
+    assert {:error, :storage, ^error} =
              Hub.communicate(
                auth(pm, %{action: "send", to: [worker.node_id], message: "Lost?"}),
                hub

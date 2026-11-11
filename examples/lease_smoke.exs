@@ -30,9 +30,14 @@ call = fn client, tool, args ->
   end
 end
 
-expect_error = fn client, tool, args, expected ->
+expect_error = fn client, tool, args, code, expected ->
   case Client.call_tool(client, tool, args) do
     {:ok, %{is_error: true, result: result}} ->
+      verify.(
+        result["structuredContent"]["error"]["code"] == code,
+        "Unexpected #{tool} error code"
+      )
+
       verify.(
         Enum.any?(result["content"], &String.starts_with?(&1["text"], expected)),
         "Unexpected #{tool} error"
@@ -137,16 +142,25 @@ IO.puts(
 
 Process.sleep(ttl_ms + 200)
 missing = "node is not registered or has expired; join again with role and ring_token"
-expect_error.(pm_client, "list_nodes", auth.(pm, %{}), missing)
-expect_error.(pm_client, "register_node", Map.take(pm, ["role", "node_id", "token"]), missing)
+expect_error.(pm_client, "list_nodes", auth.(pm, %{}), "expired", missing)
+
+expect_error.(
+  pm_client,
+  "register_node",
+  Map.take(pm, ["role", "node_id", "token"]),
+  "expired",
+  missing
+)
+
 old_pm = pm
 pm = rejoin.(pm_client, pm)
-expect_error.(pm_client, "communicate", auth.(old_pm, %{action: "receive"}), missing)
+expect_error.(pm_client, "communicate", auth.(old_pm, %{action: "receive"}), "expired", missing)
 
 expect_error.(
   pm_client,
   "communicate",
   auth.(%{pm | "token" => old_pm["token"]}, %{action: "receive"}),
+  "invalid_token",
   "invalid node token"
 )
 
@@ -173,6 +187,7 @@ expect_error.(
   pm_client,
   "communicate",
   auth.(pm, %{action: "send", to: [expired_worker["node_id"]], message: "Not delivered"}),
+  "invalid_request",
   "unknown or expired recipients"
 )
 
@@ -197,6 +212,7 @@ expect_error.(
   pm_client,
   "communicate",
   auth.(pm, %{action: "send", to: [outsider["node_id"]], message: "Cross-ring"}),
+  "invalid_request",
   "unknown or expired recipients"
 )
 

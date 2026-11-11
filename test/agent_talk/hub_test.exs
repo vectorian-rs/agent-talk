@@ -63,7 +63,7 @@ defmodule AgentTalk.HubTest do
     assert renewed.token == worker.token, "labels must not rotate credentials"
     assert {:ok, %{messages: [%{message: "Task"}]}} = receive_messages(hub, renewed)
 
-    assert {:error, "invalid node token"} =
+    assert {:error, :invalid_token, "invalid node token"} =
              Hub.list_nodes(auth(%{worker | token: "incorrect"}, %{name: "overwrite"}), hub)
 
     assert {:ok, %{nodes: latest}} = Hub.list_nodes(auth(pm), hub)
@@ -75,7 +75,7 @@ defmodule AgentTalk.HubTest do
     clock: clock
   } do
     for label <- ["", " ", "bad\nname", String.duplicate("x", 129), 42] do
-      assert {:error, _} = Hub.register(%{role: "pm", name: label}, hub)
+      assert {:error, _, _} = Hub.register(%{role: "pm", name: label}, hub)
     end
 
     pm = register(hub, %{role: "pm", project: "hiko", name: "hiko / pm"})
@@ -88,7 +88,7 @@ defmodule AgentTalk.HubTest do
         name: "hiko / w-1"
       })
 
-    assert {:error, _} = Hub.list_nodes(auth(worker, %{project: "\n"}), hub)
+    assert {:error, _, _} = Hub.list_nodes(auth(worker, %{project: "\n"}), hub)
     assert {:ok, _} = send_message(hub, pm, %{to: [worker.node_id], message: "Task"})
     Agent.update(clock, fn _ -> 1000 end)
     assert {:ok, %{nodes: [], messages: [event]}} = Hub.snapshot(hub)
@@ -101,16 +101,16 @@ defmodule AgentTalk.HubTest do
     hub: hub,
     pm: pm
   } do
-    assert {:error, _} = Hub.register(%{role: "worker"}, hub)
+    assert {:error, _, _} = Hub.register(%{role: "worker"}, hub)
 
-    assert {:error, "invalid ring token"} =
+    assert {:error, :invalid_ring_token, "invalid ring token"} =
              Hub.register(%{role: "worker", ring_token: "invalid"}, hub)
 
-    assert {:error, _} =
+    assert {:error, _, _} =
              Hub.register(%{role: "worker", ring_token: pm.ring_token, node_id: "chosen-id"}, hub)
 
-    assert {:error, _} = Hub.register(%{role: ""}, hub)
-    assert {:error, _} = Hub.register(%{role: "all"}, hub)
+    assert {:error, _, _} = Hub.register(%{role: ""}, hub)
+    assert {:error, _, _} = Hub.register(%{role: "all"}, hub)
     assert {:ok, %{nodes: [_]}} = Hub.snapshot(hub)
   end
 
@@ -125,7 +125,7 @@ defmodule AgentTalk.HubTest do
     assert {:ok, %{nodes: [found]}} = Hub.list_nodes(auth(pm, %{role: "worker"}), hub)
     assert found.node_id == worker.node_id
 
-    assert {:error, "invalid node token"} =
+    assert {:error, :invalid_token, "invalid node token"} =
              Hub.list_nodes(%{node_id: pm.node_id, token: worker.token}, hub)
   end
 
@@ -138,9 +138,11 @@ defmodule AgentTalk.HubTest do
     assert renewed.node_id == worker.node_id
     assert renewed.ring_id == worker.ring_id
     assert {:ok, %{messages: [%{message: "Task"}]}} = receive_messages(hub, renewed)
-    assert {:error, "renewal cannot change role"} = Hub.register(%{worker | role: "pm"}, hub)
 
-    assert {:error, "ring_token does not match this node's ring"} =
+    assert {:error, :invalid_request, "renewal cannot change role"} =
+             Hub.register(%{worker | role: "pm"}, hub)
+
+    assert {:error, :invalid_ring_token, "ring_token does not match this node's ring"} =
              Hub.register(%{worker | ring_token: "wrong-ring"}, hub)
   end
 
@@ -180,9 +182,9 @@ defmodule AgentTalk.HubTest do
 
     for token <- [pm.ring_token, pm.token] do
       args = %{node_id: worker.node_id, token: token}
-      assert {:error, "invalid node token"} = Hub.list_nodes(args, hub)
+      assert {:error, :invalid_token, "invalid node token"} = Hub.list_nodes(args, hub)
 
-      assert {:error, "invalid node token"} =
+      assert {:error, :invalid_token, "invalid node token"} =
                Hub.communicate(Map.put(args, :action, "receive"), hub)
     end
   end
@@ -210,7 +212,7 @@ defmodule AgentTalk.HubTest do
     other_pm = register(hub, %{role: "pm"})
     outsider = join(hub, other_pm)
 
-    assert {:error, _} =
+    assert {:error, _, _} =
              send_message(hub, pm, %{to: [worker.node_id, outsider.node_id], message: "Mixed"})
 
     assert {:ok, %{messages: []}} = receive_messages(hub, worker)
@@ -241,12 +243,12 @@ defmodule AgentTalk.HubTest do
     worker = join(hub, pm)
     other = join(hub, pm)
 
-    assert {:error, _} =
+    assert {:error, _, _} =
              send_message(hub, pm, %{to: [worker.node_id, "missing"], message: "Task"})
 
     assert {:ok, %{messages: []}} = receive_messages(hub, worker)
     for text <- ["One", "Two"], do: send_message(hub, pm, %{to: [worker.node_id], message: text})
-    assert {:error, _} = send_message(hub, pm, %{to_role: "worker", message: "Three"})
+    assert {:error, _, _} = send_message(hub, pm, %{to_role: "worker", message: "Three"})
     assert {:ok, %{messages: []}} = receive_messages(hub, other)
     assert {:ok, %{messages: [_, _]}} = receive_messages(hub, worker)
   end
@@ -262,7 +264,7 @@ defmodule AgentTalk.HubTest do
           %{to: [worker.node_id]},
           %{to: [worker.node_id], message: String.duplicate("a", 65_537)}
         ] do
-      assert {:error, _} = send_message(hub, pm, fields)
+      assert {:error, _, _} = send_message(hub, pm, fields)
     end
 
     assert {:ok, %{messages: []}} = receive_messages(hub, worker)
@@ -308,7 +310,7 @@ defmodule AgentTalk.HubTest do
     assert length(history) == 50
     assert hd(history).message == "Message 55"
     assert List.last(history).message == "Message 6"
-    assert {:error, _} = send_message(hub, pm, %{to: ["missing"], message: "Failed"})
+    assert {:error, _, _} = send_message(hub, pm, %{to: ["missing"], message: "Failed"})
     assert {:ok, %{messages: ^history}} = Hub.snapshot(hub)
   end
 
@@ -353,7 +355,7 @@ defmodule AgentTalk.HubTest do
     more_workers = for _ <- 1..20, do: join(hub, new_pm)
     replacement = start_supervised!(Supervisor.child_spec({Hub, name: nil}, id: :replacement))
 
-    assert {:error, "invalid ring token"} =
+    assert {:error, :invalid_ring_token, "invalid ring token"} =
              Hub.register(%{role: "worker", ring_token: pm.ring_token}, replacement)
 
     replaced_pm = register(replacement, %{role: "pm"})
