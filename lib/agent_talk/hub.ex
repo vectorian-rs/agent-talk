@@ -8,6 +8,11 @@ defmodule AgentTalk.Hub do
   # AgentTalk.tool_reply); the message is advisory prose, free to change.
   # Codes: :invalid_request, :invalid_labels, :invalid_ring_token,
   # :invalid_token, :expired, :inbox_full, :storage.
+  # The inbox copy of a message. Recovery rebuilds exactly this shape from
+  # archived events, so live sends and restored copies must share this one
+  # definition; UI/archive-only metadata stays out of inbox payloads.
+  @message_fields [:id, :from, :ring_id, :message, :sent_at]
+
   @labels_error "project and name must be nonempty labels of at most 128 characters without control characters"
   @missing_node_error "node is not registered or has expired; join again with role and ring_token"
   @invalid_token_error "invalid node token"
@@ -66,7 +71,14 @@ defmodule AgentTalk.Hub do
               history_db: db
             })
 
-          with :ok <- MembershipStore.save(state.membership_file, restored), do: {:ok, restored}
+          # Expired memberships are already gone, so pending rows for the
+          # surviving IDs are exactly the queued mail lost at shutdown. A
+          # failed query stops startup; it must not fake empty inboxes.
+          with {:ok, pending} <- History.pending(db, Map.keys(restored.nodes)),
+               restored = recover_inboxes(restored, pending),
+               :ok <- MembershipStore.save(state.membership_file, restored) do
+            {:ok, restored}
+          end
         end
 
       case result do
@@ -96,6 +108,27 @@ defmodule AgentTalk.Hub do
     |> Map.merge(%{saved | nodes: nodes})
     |> Map.merge(%{presence_dirty: false, presence_flushed_at: now})
     |> expire_nodes(now)
+  end
+
+  defp inbox_message(event), do: Map.take(event, @message_fields)
+
+  # Restores every pending delivery, deliberately ignoring max_inbox: the
+  # backlog was accepted before shutdown, and check_capacity/2 already
+  # rejects new mail until it drains. The operator window (state.messages)
+  # is left untouched — recovery is not history.
+  defp recover_inboxes(state, pending) do
+    nodes =
+      Enum.reduce(pending, state.nodes, fn event, nodes ->
+        copy = inbox_message(event)
+
+        event.to
+        |> Enum.reject(&(&1 in event.received_by or not Map.has_key?(nodes, &1)))
+        |> Enum.reduce(nodes, fn id, nodes ->
+          update_in(nodes[id].inbox, &:queue.in(copy, &1))
+        end)
+      end)
+
+    %{state | nodes: nodes}
   end
 
   @impl true
@@ -401,32 +434,30 @@ defmodule AgentTalk.Hub do
          :ok <- check_capacity(recipients, state) do
       {message_id, state} = allocate_id("message", state)
 
-      message = %{
+      event = %{
         id: message_id,
         from: node.node_id,
         ring_id: node.ring_id,
         message: args.message,
-        sent_at: timestamp(state)
+        sent_at: timestamp(state),
+        to: recipients,
+        from_role: node.role,
+        from_name: node_name(node),
+        to_names: Map.new(recipients, &{&1, node_name(state.nodes[&1])}),
+        project: Map.get(node, :project),
+        received_by: []
       }
+
+      copy = inbox_message(event)
 
       nodes =
         Enum.reduce(recipients, state.nodes, fn id, nodes ->
-          update_in(nodes[id].inbox, &:queue.in(message, &1))
+          update_in(nodes[id].inbox, &:queue.in(copy, &1))
         end)
-
-      event =
-        Map.merge(message, %{
-          to: recipients,
-          from_role: node.role,
-          from_name: node_name(node),
-          to_names: Map.new(recipients, &{&1, node_name(state.nodes[&1])}),
-          project: Map.get(node, :project),
-          received_by: []
-        })
 
       history = Enum.take([event | state.messages], state.history_limit)
 
-      {{:ok, %{message_id: message.id, delivered_to: recipients}},
+      {{:ok, %{message_id: event.id, delivered_to: recipients}},
        %{state | nodes: nodes, messages: history}}
     else
       {:error, _, _} = error -> {error, state}

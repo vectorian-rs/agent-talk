@@ -102,7 +102,7 @@ defmodule AgentTalk.HistoryExportTest do
            "a read-only export must not create a missing database"
   end
 
-  test "history restored after restart is shown as not collected when its inbox was volatile" do
+  test "history restored after restart keeps queued mail visible and collectable" do
     pm = register(%{role: "pm"})
     worker = register(%{role: "worker", ring_token: pm.ring_token})
     send_message(pm, worker, "Archived pending task")
@@ -110,8 +110,10 @@ defmodule AgentTalk.HistoryExportTest do
     {:ok, _} = Supervisor.restart_child(AgentTalk.Supervisor, Hub)
     {:ok, view, _} = live(build_conn(), "/")
     assert has_element?(view, ".message-item", "Archived pending task")
-    assert has_element?(view, ".delivery-status", "Not collected")
-    assert {:ok, %{messages: []}} = Hub.communicate(auth(worker, %{action: "receive"}))
+    assert has_element?(view, ".delivery-status", "Queued")
+
+    assert {:ok, %{messages: [%{message: "Archived pending task"}]}} =
+             Hub.communicate(auth(worker, %{action: "receive"}))
   end
 
   defp register(args) do

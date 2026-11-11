@@ -77,6 +77,30 @@ defmodule AgentTalk.History do
     end
   end
 
+  # Recovery source for queued mail: a pending row is a send one of the live
+  # recipients never collected. Scans the full archive on purpose — the live
+  # window (recent/2) is an operator view, not a delivery boundary.
+  def pending(nil, _live_ids), do: {:ok, []}
+  def pending(_db, []), do: {:ok, []}
+
+  def pending(db, live_ids) do
+    placeholders = Enum.map_join(live_ids, ", ", fn _ -> "?" end)
+
+    sql = """
+    SELECT event_json, collected_json FROM messages
+    WHERE EXISTS (
+      SELECT 1 FROM json_each(event_json, '$.to') AS recipient
+      WHERE recipient.value IN (#{placeholders})
+        AND recipient.value NOT IN (SELECT key FROM json_each(collected_json))
+    )
+    ORDER BY sequence
+    """
+
+    with {:ok, rows} <- query(db, sql, live_ids) do
+      decode_rows(rows)
+    end
+  end
+
   def last_counter(nil), do: {:ok, 0}
 
   def last_counter(db) do

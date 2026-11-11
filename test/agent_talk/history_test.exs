@@ -72,15 +72,21 @@ defmodule AgentTalk.HistoryTest do
     assert Enum.all?(restored, &(&1.received_by == [c.worker.node_id]))
   end
 
-  test "queued messages remain reviewable after restart without pretending volatile inboxes survived",
-       c do
+  test "queued messages survive a restart and are delivered exactly once", c do
+    worker_id = c.worker.node_id
     assert {:ok, %{message_id: id}} = send_message(c, [c.worker.node_id], "Uncollected")
     stop_supervised!(Hub)
     hub = start_supervised!({Hub, c.opts})
-    assert {:ok, %{messages: [%{id: ^id, pending_to: [], received_by: []}]}} = Hub.snapshot(hub)
+
+    assert {:ok, %{messages: [%{id: ^id, pending_to: [^worker_id], received_by: []}]}} =
+             Hub.snapshot(hub)
+
+    assert {:ok, %{messages: [%{id: ^id, message: "Uncollected"}]}} =
+             receive_messages(hub, c.worker)
+
     assert {:ok, %{messages: []}} = receive_messages(hub, c.worker)
 
-    assert {:ok, [%{id: ^id, message: "Uncollected", received_by: []}]} =
+    assert {:ok, [%{id: ^id, message: "Uncollected", received_by: [^worker_id]}]} =
              History.daily(c.history_file, ~D[2026-11-10])
   end
 
