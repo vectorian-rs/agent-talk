@@ -146,6 +146,8 @@ test("a human prompt resumes automatic turns after cancellation while checks con
     }));
     await r.hooks.session_start({ reason: "startup" }, r.ctx);
     assert.equal(r.messages.length, 1);
+    assert.match(r.messages[0].message.content, /session's existing instructions/);
+    assert.doesNotMatch(r.messages[0].message.content, /claims|acceptance|assigns the next|AGENTS\.md|\.claude/);
     const before = checks;
     await r.hooks.agent_settled({ aborted: true });
     assert.ok(checks > before, "cancelled model turns must not stop presence checks");

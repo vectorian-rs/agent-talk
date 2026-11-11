@@ -1,6 +1,6 @@
 # CLI draft
 
-Branch: `feat/onboarding-cli`. The separate worktree contains this draft; the
+Branch: `fix/cli-transport-only`. The separate worktree contains this revision; the
 running checkout and server remain unchanged. This is an initial prototype,
 not the supported onboarding path yet.
 
@@ -8,6 +8,9 @@ not the supported onboarding path yet.
 
 - The human starts each session. The CLI starts only its named client process.
 - `agent-talk.toml` is shared project configuration; no environment overrides.
+- The CLI configures transport only. It does not require instruction files,
+  discover an agent framework, supply a model prompt, or define project workflow.
+  The user's existing client configuration owns project instructions.
 - `init` creates private directories, adds the ignore rule, configures Pi's MCP
   connection without removing other servers, and prints complete launch commands.
 - `start pm` registers/resumes the PM and privately saves its invitation.
@@ -30,19 +33,20 @@ cd /Users/l1x/code/home/agent-talk-cli/cli
 npm ci --ignore-scripts
 ```
 
-From a disposable project with `AGENTS.md` and role instructions:
+From a disposable project:
 
 ```sh
-node /Users/l1x/code/home/agent-talk-cli/cli/agent-talk.mjs init --client pi --workers 4 --pm-prompt path/to/pm.md --worker-prompt path/to/worker.md
+node /Users/l1x/code/home/agent-talk-cli/cli/agent-talk.mjs init --client pi --workers 4
 ```
 
 `init` prints five complete commands, including the working directory and
 executable path. Start PM first, then each worker in its own terminal. The launcher
-supplies role instructions and membership paths; there is no startup prompt to paste.
+supplies the transport extension and membership paths. Pi opens normally so the
+user can apply their own project setup and instructions.
 Packaging a standalone `agent-talk` executable remains a follow-up.
 
-The config contains `server`, `client`, `project`, `team`, `workers`, `pm_prompt`
-and `worker_prompt`. State lives under `.agent-talk/<team>/`. Choose a new team
+The config contains `server`, `client`, `project`, `team` and `workers`.
+State lives under `.agent-talk/<team>/`. Choose a new team
 name explicitly for an independent ring. Secrets never enter launch arguments.
 
 ## Acceptance and verification
@@ -50,16 +54,23 @@ name explicitly for an independent ring. Secrets never enter launch arguments.
 - Init is repeatable and preserves other MCP servers and ignore entries.
 - PM and four workers get distinct, private memberships in one ring.
 - Workers need that team's invitation; mismatched roles/rings and bad tokens fail.
-- Prompt arguments contain paths and public IDs, never bearer credentials.
+- Launch arguments contain transport configuration, never bearer credentials or
+  project instructions. Empty projects need no particular instruction entry point.
 - Existing Pi polling tests remain green after MCP client reuse.
 - All tests use disposable directories and fake/isolated servers. Never run this
   draft against the current CeleraTax or Hiko team during development.
 
-Draft verification: 57 Elixir tests and 37 Node tests pass; formatting and diff
-checks pass. Self-review found and fixed an expired PM registration without an
+The initial draft passed 57 Elixir tests and 37 Node tests. Self-review found
+and fixed an expired PM registration without an
 invitation accidentally falling through to a fresh ring; a regression now guards
 that boundary. The running checkout's source fingerprint and listening server PID
 were unchanged throughout this draft.
+
+The transport-only revision passes 38 Node tests and the real-Pi regression
+covering registration, inbox wake-ups, cancellation, reload and server restart.
+It also tests a project with no instruction files and checks that launch arguments
+contain no startup prompt. The former role-file settings are removed; an existing
+config using those keys must remove them before adopting this revision.
 
 Before this becomes the default: add exclusive session ownership and stale-lock
 recovery, process/signal tests, actual CLI-to-Pi smoke coverage, `status` with

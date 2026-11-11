@@ -6,11 +6,11 @@ import { join } from "node:path";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { initProject, loadProject, memberFile, provision, stateDir, validate } from "./project.mjs";
+import { piArguments } from "./pi.mjs";
 
 async function project(t) {
   const root = await mkdtemp(join(tmpdir(), "agent-talk-cli-"));
   t.after(() => rm(root, { recursive: true, force: true }));
-  await writeFile(join(root, "AGENTS.md"), "Respect project approvals.\n");
   return root;
 }
 
@@ -43,7 +43,7 @@ test("init is repeatable, prepares private state and preserves other MCP servers
   assert.equal((await stat(stateDir(root, config))).mode & 0o777, 0o700);
 });
 
-test("PM and four workers register with private files and token-free prompts", async (t) => {
+test("PM and four workers register privately without requiring or producing project instructions", async (t) => {
   const root = await project(t), config = await initProject(root, { workers: 4 }), client = broker();
   const pm = await provision(root, config, "pm", client);
   const invitation = JSON.parse(await readFile(join(stateDir(root, config), "invitation.json"), "utf8"));
@@ -53,9 +53,7 @@ test("PM and four workers register with private files and token-free prompts", a
     const saved = JSON.parse(await readFile(result.file, "utf8"));
     assert.equal(saved.node_id, result.member.node_id);
     assert.equal((await stat(result.file)).mode & 0o777, 0o600);
-    assert.ok(!result.prompt.includes(result.member.token) && !result.prompt.includes(invitation.ring_token),
-      "startup prompts must contain no credentials");
-    assert.ok(result.prompt.includes(result.file));
+    assert.equal(Object.hasOwn(result, "prompt"), false, "transport provisioning must not author an agent prompt");
   }
   assert.equal(client.calls.length, 5);
   assert.ok(client.calls.slice(1).every(({ args }) => args.role === "worker" && args.ring_token === invitation.ring_token));
@@ -97,9 +95,20 @@ test("invalid labels and mismatched saved roles fail before registration", async
   }));
   await assert.rejects(provision(root, config, "w-1", client), /does not match/);
   assert.equal(client.calls.length, 1);
-  for (const change of [{ team: "../other" }, { workers: 5 }, { client: "claude" }, { unknown: true }]) {
+  for (const change of [{ team: "../other" }, { workers: 5 }, { client: "unsupported" }, { unknown: true },
+    { pm_prompt: "any/path.md" }, { worker_prompt: "any/path.md" }]) {
     assert.throws(() => validate({ ...config, ...change }));
   }
+});
+
+test("Pi launch arguments configure only transport and inject no project setup or startup prompt", () => {
+  const file = "/project/.agent-talk/delivery/pm.json", server = "http://127.0.0.1:4000/mcp";
+  const args = piArguments(file, server);
+  assert.equal(args.length, 6);
+  assert.equal(args[0], "-e");
+  assert.deepEqual(args.slice(2), ["--agent-talk-membership", file, "--agent-talk-url", server]);
+  assert.ok(!args.includes("--"), "a positional startup prompt must not be appended");
+  assert.doesNotMatch(args.join(" "), /AGENTS\.md|\.claude|SKILL\.md|system-prompt/);
 });
 
 test("the init executable prints five complete shell-safe launch commands", async (t) => {

@@ -3,28 +3,28 @@ import { parseArgs } from "node:util";
 import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { initProject, loadProject, connect, provision } from "./project.mjs";
+import { piArguments } from "./pi.mjs";
 
-const help = "Draft: agent-talk init [--client pi] [--workers 4] [--pm-prompt file] [--worker-prompt file]\n       agent-talk start pm|w-1|w-2|w-3|w-4\nRun from your project root. Only the requested session is launched.";
+const help = "Draft: agent-talk init [--client pi] [--workers 4]\n       agent-talk start pm|w-1|w-2|w-3|w-4\nRun from your project root. Only the requested session is launched. Project instructions are owned by your client setup.";
 const quote = (value) => "'" + value.replaceAll("'", "'\\''") + "'";
 try {
   const { values, positionals } = parseArgs({ allowPositionals: true, strict: true, options: {
     client: { type: "string" }, workers: { type: "string" }, server: { type: "string" },
-    "pm-prompt": { type: "string" }, "worker-prompt": { type: "string" }, help: { type: "boolean", short: "h" },
+    help: { type: "boolean", short: "h" },
   } });
   const [command, label] = positionals, root = process.cwd();
   if (values.help || !command) console.log(help);
   else if (command === "init" && positionals.length === 1) {
-    const config = await initProject(root, { ...values, pm_prompt: values["pm-prompt"], worker_prompt: values["worker-prompt"] });
+    const config = await initProject(root, values);
     console.log(`Configured ${config.project}. Run each command in its own terminal, PM first:`);
     for (const label of ["pm", ...Array.from({ length: config.workers }, (_, n) => "w-" + (n + 1))]) {
       console.log(`cd ${quote(root)} && ${quote(process.execPath)} ${quote(fileURLToPath(import.meta.url))} start ${label}`);
     }
   } else if (command === "start" && positionals.length === 2 && Object.keys(values).length === 0) {
     const config = await loadProject(root), client = await connect(config.server);
-    const { member, file, prompt } = await provision(root, config, label, client);
+    const { member, file } = await provision(root, config, label, client);
     console.log(`Starting ${config.project} / ${label}: ${member.node_id}, ${member.ring_id}`);
-    const child = spawn("pi", ["-e", fileURLToPath(new URL("../integrations/pi/agent-talk.ts", import.meta.url)),
-      "--agent-talk-membership", file, "--agent-talk-url", config.server, "--", prompt], { cwd: root, stdio: "inherit" });
+    const child = spawn("pi", piArguments(file, config.server), { cwd: root, stdio: "inherit" });
     const forward = () => child.kill("SIGTERM");
     process.once("SIGTERM", forward);
     process.exitCode = await new Promise((resolve, reject) => { child.once("error", reject); child.once("exit", (code) => resolve(code ?? 1)); });

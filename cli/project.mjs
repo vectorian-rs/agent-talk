@@ -1,14 +1,15 @@
 import { readFile, writeFile, mkdir, chmod, open, rename, rm } from "node:fs/promises";
-import { basename, resolve, join } from "node:path";
+import { basename, join } from "node:path";
 import { randomBytes } from "node:crypto";
 import { parse, stringify } from "smol-toml";
 import { ClientError, McpClient, readMembership } from "../integrations/polling/mcp.mjs";
 
-const keys = ["server", "client", "project", "team", "workers", "pm_prompt", "worker_prompt"];
+const keys = ["server", "client", "project", "team", "workers"];
 const error = (message) => new ClientError("configuration", message);
 
 export function validate(config) {
-  if (Object.keys(config).some((key) => !keys.includes(key))) throw error("Unknown setting in agent-talk.toml.");
+  const unknown = Object.keys(config).filter((key) => !keys.includes(key));
+  if (unknown.length) throw error("Unknown settings in agent-talk.toml: " + unknown.join(", "));
   new McpClient(config.server);
   if (config.client !== "pi") throw error("This draft supports client = pi only.");
   if (typeof config.project !== "string" || !config.project.trim() || config.project.length > 122 || /[\u0000-\u001f\u007f-\u009f]/u.test(config.project)) {
@@ -19,9 +20,6 @@ export function validate(config) {
   }
   if (!Number.isInteger(config.workers) || config.workers < 1 || config.workers > 4) {
     throw error("workers must be 1..4.");
-  }
-  for (const key of ["pm_prompt", "worker_prompt"]) {
-    if (typeof config[key] !== "string" || !config[key].trim()) throw error(key + " must name a role instruction file.");
   }
   return { ...config };
 }
@@ -79,21 +77,11 @@ export async function initProject(root, options = {}) {
   catch (e) {
     if (e.code !== "ENOENT") throw e;
     config = validate({ server: options.server ?? "http://127.0.0.1:4000/mcp", client: options.client ?? "pi",
-      project: basename(root), team: "delivery", workers: Number(options.workers ?? 2),
-      pm_prompt: options.pm_prompt ?? "AGENTS.md", worker_prompt: options.worker_prompt ?? "AGENTS.md" });
-    await checkPrompts(root, config);
+      project: basename(root), team: "delivery", workers: Number(options.workers ?? 2) });
     await writeFile(file, stringify(config), { flag: "wx" });
   }
-  await checkPrompts(root, config);
   await prepare(root, config);
   return config;
-}
-
-async function checkPrompts(root, config) {
-  for (const path of new Set([config.pm_prompt, config.worker_prompt])) {
-    try { await readFile(resolve(root, path), "utf8"); }
-    catch { throw error("Role instructions are missing. Set pm_prompt and worker_prompt to existing files."); }
-  }
 }
 
 export const stateDir = (root, config) => join(root, ".agent-talk", config.team);
@@ -113,7 +101,6 @@ export async function connect(server) {
 export async function provision(root, config, label, client) {
   const labels = ["pm", ...Array.from({ length: config.workers }, (_, n) => "w-" + (n + 1))];
   if (!labels.includes(label)) throw error("Choose pm or a configured worker label.");
-  await checkPrompts(root, config);
   await prepare(root, config);
   const role = label === "pm" ? "pm" : "worker", file = memberFile(root, config, label);
   let invitation;
@@ -147,14 +134,5 @@ export async function provision(root, config, label, client) {
   if (role === "pm") await savePrivate(join(stateDir(root, config), "invitation.json"), {
     ring_id: member.ring_id, ring_token: member.ring_token, pm_id: member.node_id,
   });
-  const prompt = [
-    `Read AGENTS.md when present and follow ${JSON.stringify(resolve(root, role === "pm" ? config.pm_prompt : config.worker_prompt))}.`,
-    `Use transport=agent-talk as ${label}. Your membership is already registered and saved privately at ${JSON.stringify(file)}.`,
-    "This path overrides transport documentation defaults. Read credentials privately; never print either token. Do not create another ring.",
-    "The Pi extension checks presence and wakes this session. Receive and handle notifications automatically; send actual replies through communicate.",
-    "Follow project claims and human approval gates. Do not start other agents or LLM polling loops.",
-    role === "pm" ? `The operator launches ${config.workers} workers with this CLI; no invitation prompts are needed. Verify their joined messages, map labels to sender IDs, report ready, and wait for the owner's issue.` :
-      `Verify PM ${invitation.pm_id} in ring ${member.ring_id}, send "joined ${label}" to that PM, then handle its authorized assignments with receipt, disposition and result replies.`,
-  ].join("\n");
-  return { member, file, prompt };
+  return { member, file };
 }
