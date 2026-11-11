@@ -271,8 +271,9 @@ read-only connection.
 
 Recording starts when this version is activated. Previously lost in-memory history
 cannot be reconstructed, and the first activating restart cannot restore mail that
-was never archived. From then on, a message acknowledged with `delivered_to` is
-either collected or discarded by its recipient's expiry — never by a hub restart.
+was never archived. From then on, with the archive enabled, a message acknowledged with
+`delivered_to` is either collected or discarded by its recipient's expiry —
+never by a hub restart.
 Archive retention is independent of the UI limit and has no automatic deletion.
 
 For another port, update the MCP URL and add

@@ -169,7 +169,7 @@ defmodule AgentTalk.PersistenceTest do
       assert restored.from == pm.node_id
 
       assert Enum.sort(Map.keys(restored)) == [:from, :id, :message, :ring_id, :sent_at],
-             "recovered copies must match the live inbox payload shape"
+             "recovered copies must keep the agreed inbox payload contract"
 
       assert {:ok, %{messages: []}} = receive_messages(hub, worker)
       hub = restart(opts)
@@ -194,9 +194,8 @@ defmodule AgentTalk.PersistenceTest do
     end
 
     test "recovery is not bounded by the live history window", %{opts: opts} do
-      stop_supervised!(:persistent_hub)
       opts = Keyword.put(opts, :history_limit, 3)
-      hub = start_hub(opts)
+      hub = restart(opts)
       pm = register(hub, %{role: "pm"})
       slow = register(hub, %{role: "worker", ring_token: pm.ring_token})
       busy = register(hub, %{role: "worker", ring_token: pm.ring_token})
@@ -224,7 +223,7 @@ defmodule AgentTalk.PersistenceTest do
       worker = register(hub, %{role: "worker", ring_token: pm.ring_token})
       for n <- 1..3, do: {:ok, _} = send_message(hub, pm, worker, "Backlog #{n}")
 
-      hub = restart(opts ++ [max_inbox: 2])
+      hub = restart(Keyword.put(opts, :max_inbox, 2))
       assert {:ok, %{inbox: %{pending_messages: 3}}} = Hub.list_nodes(auth(worker), hub)
       assert {:ok, %{messages: [_, _, _]}} = receive_messages(hub, worker)
     end
@@ -234,15 +233,7 @@ defmodule AgentTalk.PersistenceTest do
       prompt = register(hub, %{role: "worker", ring_token: pm.ring_token})
       tardy = register(hub, %{role: "worker", ring_token: pm.ring_token})
 
-      assert {:ok, _} =
-               Hub.communicate(
-                 auth(pm, %{
-                   action: "send",
-                   to: [prompt.node_id, tardy.node_id],
-                   message: "Fan-out"
-                 }),
-                 hub
-               )
+      assert {:ok, _} = send_message(hub, pm, [prompt, tardy], "Fan-out")
 
       assert {:ok, %{messages: [_]}} = receive_messages(hub, prompt)
 
@@ -255,9 +246,8 @@ defmodule AgentTalk.PersistenceTest do
       hub: hub,
       opts: opts
     } do
-      stop_supervised!(:persistent_hub)
       opts = Keyword.put(opts, :history_limit, 2)
-      hub = start_hub(opts)
+      hub = restart(opts)
       pm = register(hub, %{role: "pm"})
       worker = register(hub, %{role: "worker", ring_token: pm.ring_token})
       assert {:ok, _} = send_message(hub, pm, worker, "Valid 1")
@@ -300,10 +290,14 @@ defmodule AgentTalk.PersistenceTest do
     node
   end
 
-  defp send_message(hub, sender, recipient, message),
+  defp send_message(hub, sender, recipients, message),
     do:
       Hub.communicate(
-        auth(sender, %{action: "send", to: [recipient.node_id], message: message}),
+        auth(sender, %{
+          action: "send",
+          to: recipients |> List.wrap() |> Enum.map(& &1.node_id),
+          message: message
+        }),
         hub
       )
 

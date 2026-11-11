@@ -59,26 +59,24 @@ defmodule AgentTalk.Hub do
 
     with {:ok, saved} <- MembershipStore.load(state.membership_file),
          {:ok, db} <- History.open(state.history_file) do
+      # Expired memberships are gone after restore/3, so pending rows for the
+      # surviving IDs are exactly the queued mail lost at shutdown. A failed
+      # query stops startup; it must not fake empty inboxes.
       result =
         with {:ok, messages} <- History.recent(db, state.history_limit),
-             {:ok, counter} <- History.last_counter(db) do
-          restored =
-            state
-            |> restore(saved, now)
-            |> Map.merge(%{
-              next_id: max(saved.next_id, counter),
-              messages: messages,
-              history_db: db
-            })
-
-          # Expired memberships are already gone, so pending rows for the
-          # surviving IDs are exactly the queued mail lost at shutdown. A
-          # failed query stops startup; it must not fake empty inboxes.
-          with {:ok, pending} <- History.pending(db, Map.keys(restored.nodes)),
-               restored = recover_inboxes(restored, pending),
-               :ok <- MembershipStore.save(state.membership_file, restored) do
-            {:ok, restored}
-          end
+             {:ok, counter} <- History.last_counter(db),
+             restored =
+               state
+               |> restore(saved, now)
+               |> Map.merge(%{
+                 next_id: max(saved.next_id, counter),
+                 messages: messages,
+                 history_db: db
+               }),
+             {:ok, pending} <- History.pending(db, Map.keys(restored.nodes)),
+             restored = recover_inboxes(restored, pending),
+             :ok <- MembershipStore.save(state.membership_file, restored) do
+          {:ok, restored}
         end
 
       case result do
@@ -112,6 +110,12 @@ defmodule AgentTalk.Hub do
 
   defp inbox_message(event), do: Map.take(event, @message_fields)
 
+  defp deliver(nodes, recipients, copy) do
+    Enum.reduce(recipients, nodes, fn id, nodes ->
+      update_in(nodes[id].inbox, &:queue.in(copy, &1))
+    end)
+  end
+
   # Restores every pending delivery, deliberately ignoring max_inbox: the
   # backlog was accepted before shutdown, and check_capacity/2 already
   # rejects new mail until it drains. The operator window (state.messages)
@@ -119,13 +123,10 @@ defmodule AgentTalk.Hub do
   defp recover_inboxes(state, pending) do
     nodes =
       Enum.reduce(pending, state.nodes, fn event, nodes ->
-        copy = inbox_message(event)
+        recipients =
+          Enum.filter(event.to, &(Map.has_key?(nodes, &1) and &1 not in event.received_by))
 
-        event.to
-        |> Enum.reject(&(&1 in event.received_by or not Map.has_key?(nodes, &1)))
-        |> Enum.reduce(nodes, fn id, nodes ->
-          update_in(nodes[id].inbox, &:queue.in(copy, &1))
-        end)
+        deliver(nodes, recipients, inbox_message(event))
       end)
 
     %{state | nodes: nodes}
@@ -448,13 +449,7 @@ defmodule AgentTalk.Hub do
         received_by: []
       }
 
-      copy = inbox_message(event)
-
-      nodes =
-        Enum.reduce(recipients, state.nodes, fn id, nodes ->
-          update_in(nodes[id].inbox, &:queue.in(copy, &1))
-        end)
-
+      nodes = deliver(state.nodes, recipients, inbox_message(event))
       history = Enum.take([event | state.messages], state.history_limit)
 
       {{:ok, %{message_id: event.id, delivered_to: recipients}},
