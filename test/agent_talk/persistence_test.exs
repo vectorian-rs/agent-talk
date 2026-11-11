@@ -168,7 +168,14 @@ defmodule AgentTalk.PersistenceTest do
       assert %{id: ^first, message: "First"} = restored
       assert restored.from == pm.node_id
 
-      assert Enum.sort(Map.keys(restored)) == [:from, :id, :message, :ring_id, :sent_at],
+      assert Enum.sort(Map.keys(restored)) == [
+               :from,
+               :id,
+               :message,
+               :reply_to,
+               :ring_id,
+               :sent_at
+             ],
              "recovered copies must keep the agreed inbox payload contract"
 
       assert {:ok, %{messages: []}} = receive_messages(hub, worker)
@@ -240,6 +247,32 @@ defmodule AgentTalk.PersistenceTest do
       hub = restart(opts)
       assert {:ok, %{messages: []}} = receive_messages(hub, prompt)
       assert {:ok, %{messages: [%{message: "Fan-out"}]}} = receive_messages(hub, tardy)
+    end
+
+    test "reply references survive recovery even when the parent left the live window", %{
+      opts: opts
+    } do
+      opts = Keyword.put(opts, :history_limit, 2)
+      hub = restart(opts)
+      pm = register(hub, %{role: "pm"})
+      worker = register(hub, %{role: "worker", ring_token: pm.ring_token})
+      assert {:ok, %{message_id: task}} = send_message(hub, pm, worker, "Task")
+      assert {:ok, %{messages: [_]}} = receive_messages(hub, worker)
+
+      assert {:ok, %{message_id: done}} =
+               Hub.communicate(
+                 auth(worker, %{action: "send", to: [pm.node_id], message: "Done", reply_to: task}),
+                 hub
+               )
+
+      for n <- 1..2, do: {:ok, _} = send_message(hub, pm, worker, "Push #{n}")
+
+      hub = restart(opts)
+      assert {:ok, %{messages: window}} = Hub.snapshot(hub)
+      refute Enum.any?(window, &(&1.id in [task, done])), "the reply must be outside the window"
+
+      assert {:ok, %{messages: [%{id: ^done, message: "Done", reply_to: ^task}]}} =
+               receive_messages(hub, pm)
     end
 
     test "a failed pending query stops startup instead of faking empty inboxes", %{

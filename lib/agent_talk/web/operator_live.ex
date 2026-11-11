@@ -267,7 +267,7 @@ defmodule AgentTalk.Web.OperatorLive do
                 </div>
                 <p class="message-body"><%= for part <- @parts[event.id] do %><a :if={part.url} href={part.url} target="_blank" rel="noopener noreferrer">{part.text}</a>{if is_nil(part.url), do: part.text}<% end %></p>
                 <div class="message-footer">
-                  <span class="small-label message-kind">{event.ring_id} · {if length(event.to) > 1, do: "Broadcast · #{length(event.to)} recipients", else: "Direct message"}</span>
+                  <span class="small-label message-kind">{event.ring_id} · {if length(event.to) > 1, do: "Broadcast · #{length(event.to)} recipients", else: "Direct message"}<span :if={event.reply_to} class="reply-ref" title="Answers an earlier message"> · ↩ {event.reply_to}</span></span>
                   <span class={["delivery-status", event.received_by != [] && "delivery-collected"]} title="Collected means a recipient fetched the message from its inbox.">
                     <span aria-hidden="true">{if event.received_by == [], do: "○", else: "✓"}</span> {delivery(event)}
                   </span>

@@ -8,6 +8,7 @@ defmodule AgentTalk.History do
     :from,
     :message,
     :sent_at,
+    :reply_to,
     :to,
     :from_role,
     :from_name,
@@ -205,8 +206,10 @@ defmodule AgentTalk.History do
             "#{id}: #{Map.get(event.collected_at, id, "not collected")}"
           end)
 
+        reply = if event.reply_to, do: "\nReply-To: #{event.reply_to}", else: ""
+
         text =
-          "Ring: #{event.ring_id}\nProject: #{event.project || "unspecified"}\nSent: #{event.sent_at}\nFrom: #{event.from_name} (#{event.from})\nTo: #{recipients}\n\n#{event.message}\n\nCollection:\n#{collected}"
+          "Ring: #{event.ring_id}\nProject: #{event.project || "unspecified"}\nSent: #{event.sent_at}\nFrom: #{event.from_name} (#{event.from})\nTo: #{recipients}#{reply}\n\n#{event.message}\n\nCollection:\n#{collected}"
 
         fence_size =
           Regex.scan(~r/`+/, text)

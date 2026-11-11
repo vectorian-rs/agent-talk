@@ -7,6 +7,8 @@ defmodule AgentTalk.Tools.Communicate do
   Authenticated calls renew only the caller's lease; sends do not renew recipients.
   A send queues messages; recipient expiry can discard them before collection.
   Call receive between tasks to collect messages; use register_node for an idle heartbeat.
+  When answering a specific message, set reply_to to its id so the answer can be
+  matched to the task it resolves.
   """
   use Anubis.Server.Component, type: :tool, name: "communicate"
 
@@ -17,6 +19,7 @@ defmodule AgentTalk.Tools.Communicate do
     field(:to, {:list, :string}, description: "One or more recipient node IDs")
     field(:to_role, :string, description: "Role within your ring, or all for every other member")
     field(:message, :string, description: "Message text (up to 65536 bytes)")
+    field(:reply_to, :string, description: "Id of the message this send answers")
   end
 
   @impl true

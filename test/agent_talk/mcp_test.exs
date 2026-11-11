@@ -98,12 +98,21 @@ defmodule AgentTalk.MCPTest do
       call(
         name,
         "communicate",
-        auth(node, %{action: "send", to: [pm["node_id"]], message: "Done"})
+        auth(node, %{
+          action: "send",
+          to: [pm["node_id"]],
+          message: "Done",
+          reply_to: sent["message_id"]
+        })
       )
     end
 
     inbox = call(AgentTalk.TestPM, "communicate", auth(pm, %{action: "receive"}))
     assert Enum.map(inbox["messages"], & &1["from"]) |> Enum.sort() == ids
+
+    assert Enum.all?(inbox["messages"], &(&1["reply_to"] == sent["message_id"])),
+           "replies must carry the answered message id end to end"
+
     assert {:error, _} = Anubis.Client.call_tool(AgentTalk.TestPM, "register_node", %{})
     assert {:error, _} = Anubis.Client.call_tool(AgentTalk.TestPM, "list_nodes", %{})
 

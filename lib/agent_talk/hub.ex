@@ -15,7 +15,7 @@ defmodule AgentTalk.Hub do
   # The inbox copy of a message. Recovery rebuilds exactly this shape from
   # archived events, so live sends and restored copies must share this one
   # definition; UI/archive-only metadata stays out of inbox payloads.
-  @message_fields [:id, :from, :ring_id, :message, :sent_at]
+  @message_fields [:id, :from, :ring_id, :message, :sent_at, :reply_to]
 
   def start_link(opts) do
     GenServer.start_link(__MODULE__, opts, name: Keyword.get(opts, :name, __MODULE__))
@@ -405,8 +405,9 @@ defmodule AgentTalk.Hub do
   defp communicate(%{action: "receive"} = args, state, node) do
     cond do
       Map.get(args, :to) != nil or Map.get(args, :to_role) != nil or
-          Map.get(args, :message) != nil ->
-        {{:error, :invalid_request, "receive takes no to, to_role or message fields"}, state}
+        Map.get(args, :message) != nil or Map.get(args, :reply_to) != nil ->
+        {{:error, :invalid_request, "receive takes no to, to_role, message or reply_to fields"},
+         state}
 
       :queue.is_empty(node.inbox) ->
         {{:ok, %{messages: []}}, state}
@@ -431,6 +432,7 @@ defmodule AgentTalk.Hub do
 
   defp communicate(%{action: "send"} = args, state, node) do
     with :ok <- validate_message(Map.get(args, :message)),
+         :ok <- validate_reply_to(Map.get(args, :reply_to)),
          {:ok, recipients} <- recipients(args, ring_nodes(state, node.ring_id), node.node_id),
          :ok <- check_capacity(recipients, state) do
       {message_id, state} = allocate_id("message", state)
@@ -441,6 +443,7 @@ defmodule AgentTalk.Hub do
         ring_id: node.ring_id,
         message: args.message,
         sent_at: timestamp(state),
+        reply_to: Map.get(args, :reply_to),
         to: recipients,
         from_role: node.role,
         from_name: node_name(node),
@@ -509,6 +512,17 @@ defmodule AgentTalk.Hub do
   end
 
   defp validate_message(_), do: {:error, :invalid_request, "message is required when sending"}
+
+  # Shape-only on purpose: the in-memory window is bounded, so checking that
+  # the parent exists would make validity depend on eviction timing, and a
+  # reply to a pruned message is still a true statement about causality.
+  defp validate_reply_to(nil), do: :ok
+
+  defp validate_reply_to(id) do
+    if valid_id?(id),
+      do: :ok,
+      else: {:error, :invalid_request, "reply_to must be a message id"}
+  end
 
   defp valid_id?(id), do: is_binary(id) and Regex.match?(~r/\A[a-zA-Z0-9_.-]{1,64}\z/, id)
 
