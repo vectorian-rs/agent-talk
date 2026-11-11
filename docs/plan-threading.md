@@ -10,11 +10,13 @@ and every received message carries `id`; nothing lets a sender point at one.
 
 ## Simplest solution
 
+Implement after inbox recovery (#6), extending its shared inbox-payload
+definition. Long polling (#4) is not a dependency.
+
 One optional field on `communicate action: "send"`: `reply_to`, the id of the
 message being answered. The hub stores it on the message map it already
-builds, which makes it appear everywhere that map travels — recipients'
-inbox copies, `snapshot` history, and the SQLite archive — with no further
-plumbing.
+builds. Include it in both the shared inbox allowlist and the archive's
+field list so live delivery, restart recovery, history and exports agree.
 
 - **Validation is shape-only** (`valid_id?/1`, the existing
   `~r/\A[a-zA-Z0-9_.-]{1,64}\z/`); violations are `invalid_request`.
@@ -30,10 +32,12 @@ plumbing.
 
 - `lib/agent_talk/hub.ex`, `"send"` branch of `communicate/3`: one new clause
   in the `with` chain (`:ok <- validate_reply_to(...)`) and
-  `reply_to: Map.get(args, :reply_to)` added to the `message` map. Nothing
-  else — the same map becomes the inbox copy and the history event. One
+  `reply_to: Map.get(args, :reply_to)` added to the event. Add `:reply_to` to
+  #6's `@message_fields`; live sends and recovered inbox copies must both use
+  `inbox_message(event)` rather than separate `Map.take` field lists. One
   sentence in `registration/2` instructions tells agents to set it when
-  answering a specific message.
+  answering a specific message. Reject a non-nil `reply_to` on `receive`,
+  just like the existing send-only fields.
 - `lib/agent_talk/tools/communicate.ex`: `field(:reply_to, :string, ...)` and
   one moduledoc sentence.
 - `lib/agent_talk/history.ex`: add `:reply_to` to `@fields`. Events are a
@@ -64,16 +68,21 @@ plumbing.
 3. `reply_to` values failing `valid_id?/1` (empty, whitespace, non-string,
    65+ chars) return `invalid_request`; a well-formed id that was evicted or
    never existed succeeds.
-4. Round-trip through the archive: record a reply, `recent/2` returns it with
-   `reply_to`; a pre-threading row (event_json without the key) still decodes,
-   as `nil` (`history_test.exs`).
+4. Round-trip through the archive: record a reply, `recent/2` and `pending/2`
+   return it with `reply_to`; a pre-threading row (event_json without the key)
+   still decodes as `nil` (`history_test.exs`).
 5. `markdown/2` output contains `Reply-To:` for replies and omits it
    otherwise.
 6. The LiveView renders the tag for replies and is unchanged for plain
    messages.
-7. `mix test`, all Node suites, and all three smokes pass.
+7. Send a reply, move its parent outside the live window, then restart the
+   hub. The restored `receive` payload retains the original `reply_to`, FIFO
+   order and the same field set as live delivery (`persistence_test.exs`).
+8. `receive` with a non-nil `reply_to` returns `invalid_request`.
+9. `mix test`, all Node suites, and all three smokes pass.
 
 ## Risks
 
-Only one trap: adding `reply_to` to `decode_rows/1`'s required-binary list
-would break old archives — criterion 4 exists to catch exactly that.
+Adding `reply_to` to `decode_rows/1`'s required-binary list would break old
+archives; criterion 4 covers that. A separate recovery field list would drop
+reply references on restart; criterion 7 covers the shared-payload contract.
