@@ -16,7 +16,8 @@ defmodule AgentTalk.Application do
          ttl_ms: ttl_ms,
          history_limit: history_limit,
          pubsub: AgentTalk.PubSub,
-         membership_file: Application.fetch_env!(:agent_talk, :membership_file)},
+         membership_file: Application.fetch_env!(:agent_talk, :membership_file),
+         history_file: Application.fetch_env!(:agent_talk, :history_file)},
         {AgentTalk.Server, transport: {:streamable_http, start: true}},
         AgentTalk.Web.Endpoint
       ] ++ http_children()
@@ -27,7 +28,8 @@ defmodule AgentTalk.Application do
       "AgentTalk v#{Application.spec(:agent_talk, :vsn)} config: " <>
         "#{Application.fetch_env!(:agent_talk, :config_file)}; " <>
         "registration lease: #{div(ttl_ms, 1000)} seconds; message history: #{history_limit}; " <>
-        "memberships: #{Application.fetch_env!(:agent_talk, :membership_file) || "memory only"}"
+        "memberships: #{Application.fetch_env!(:agent_talk, :membership_file) || "memory only"}; " <>
+        "conversation archive: #{Application.fetch_env!(:agent_talk, :history_file) || "disabled"}"
     )
 
     Supervisor.start_link(children, opts)
