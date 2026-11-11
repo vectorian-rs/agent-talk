@@ -34,10 +34,11 @@ field list so live delivery, restart recovery, history and exports agree.
   in the `with` chain (`:ok <- validate_reply_to(...)`) and
   `reply_to: Map.get(args, :reply_to)` added to the event. Add `:reply_to` to
   #6's `@message_fields`; live sends and recovered inbox copies must both use
-  `inbox_message(event)` rather than separate `Map.take` field lists. One
-  sentence in `registration/2` instructions tells agents to set it when
-  answering a specific message. Reject a non-nil `reply_to` on `receive`,
-  just like the existing send-only fields.
+  `inbox_message(event)` rather than separate `Map.take` field lists. Reject
+  a non-nil `reply_to` on `receive`, just like the existing send-only fields.
+  The `registration/2` instructions are NOT touched: the one sentence in the
+  communicate tool moduledoc is the adoption mechanism (the Clients bullet
+  below), and a second prose site saying the same thing would only drift.
 - `lib/agent_talk/tools/communicate.ex`: `field(:reply_to, :string, ...)` and
   one moduledoc sentence.
 - `lib/agent_talk/history.ex`: add `:reply_to` to `@fields`. Events are a
