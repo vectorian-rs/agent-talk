@@ -51,6 +51,10 @@ defmodule AgentTalk.Hub do
   def communicate(args, server \\ __MODULE__), do: GenServer.call(server, {:communicate, args})
   def snapshot(server \\ __MODULE__), do: GenServer.call(server, :snapshot)
 
+  # Operator-initiated removal of a node (force-expire). Called in-process from
+  # the trusted local dashboard, not over MCP, so it takes no token.
+  def evict(node_id, server \\ __MODULE__), do: GenServer.call(server, {:evict, node_id})
+
   def topic, do: "agent-talk:operator"
 
   @impl true
@@ -309,6 +313,14 @@ defmodule AgentTalk.Hub do
     }
 
     {{:ok, data}, state}
+  end
+
+  # Drop a node exactly as a lease expiry would: its queued mail goes with it,
+  # and handle_call's persist + broadcast then apply. Idempotent — an unknown or
+  # already-gone id reports evicted: false and changes nothing.
+  defp dispatch({:evict, node_id}, state, _now) do
+    {{:ok, %{evicted: Map.has_key?(state.nodes, node_id)}},
+     %{state | nodes: Map.delete(state.nodes, node_id)}}
   end
 
   defp dispatch({:register, args}, state, now) do

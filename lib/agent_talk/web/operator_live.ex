@@ -30,6 +30,13 @@ defmodule AgentTalk.Web.OperatorLive do
     end
   end
 
+  def handle_event("evict", %{"node_id" => node_id}, socket) do
+    # The dashboard is the trusted local surface; eviction needs no token. The
+    # pubsub broadcast from the hub refreshes this and every other open view.
+    {:ok, _} = Hub.evict(node_id)
+    {:noreply, socket}
+  end
+
   defp refresh(socket) do
     {:ok, snapshot} = Hub.snapshot()
     rings = ring_options(snapshot)
@@ -219,6 +226,16 @@ defmodule AgentTalk.Web.OperatorLive do
                   </p>
                 </div>
                 <span class="agent-online" aria-label="Registration active"></span>
+                <button
+                  type="button"
+                  class="agent-evict"
+                  phx-click="evict"
+                  phx-value-node_id={node.node_id}
+                  data-confirm={"Evict #{node.name}? Its queued mail is discarded and it must re-register."}
+                  title="Force-expire this node"
+                >
+                  Evict
+                </button>
               </li>
             </ul>
             <div class="presence-note">

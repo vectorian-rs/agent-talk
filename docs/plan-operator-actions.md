@@ -1,6 +1,7 @@
 # Plan: operator actions (evict a node)
 
-Status: draft (plan only). Least-complexity design for review before implementing.
+Status: implemented on top of main. The operator dashboard can evict a node via
+`Hub.evict/1`, reusing the expiry path; further actions remain future work.
 
 ## Problem
 

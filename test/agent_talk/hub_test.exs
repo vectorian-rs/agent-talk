@@ -428,6 +428,36 @@ defmodule AgentTalk.HubTest do
     assert Enum.map(inbox, & &1.message) == Enum.map(1..4, &"Message #{&1}")
   end
 
+  test "evicting a node frees its slot, discards its mail and invalidates its token", %{
+    hub: hub,
+    pm: pm
+  } do
+    worker = join(hub, pm)
+    other = join(hub, pm)
+    send_message(hub, pm, %{to: [worker.node_id], message: "Queued"})
+
+    assert {:ok, %{evicted: true}} = Hub.evict(worker.node_id, hub)
+
+    assert {:ok, %{nodes: nodes}} = Hub.list_nodes(auth(pm), hub)
+    refute Enum.any?(nodes, &(&1.node_id == worker.node_id))
+    assert Enum.any?(nodes, &(&1.node_id == other.node_id)), "eviction is scoped to its target"
+
+    assert {:error, :expired, _} = Hub.list_nodes(auth(worker), hub)
+
+    # Idempotent: re-evicting or evicting an unknown id is a safe no-op.
+    assert {:ok, %{evicted: false}} = Hub.evict(worker.node_id, hub)
+    assert {:ok, %{evicted: false}} = Hub.evict("node-999999", hub)
+  end
+
+  test "evicting a node releases its parked long-poll waiter as expired", %{hub: hub, pm: pm} do
+    worker = join(hub, pm)
+    parked = Task.async(fn -> Hub.list_nodes(auth(worker, %{wait_seconds: 10}), hub) end)
+    await_waiter(hub, worker.node_id)
+    assert {:ok, %{evicted: true}} = Hub.evict(worker.node_id, hub)
+    assert {:error, :expired, _} = Task.await(parked, 1000)
+    assert :sys.get_state(hub).waiters == %{}
+  end
+
   test "IDs are never reused after expiry or hub replacement within the server VM", %{
     hub: hub,
     clock: clock,
