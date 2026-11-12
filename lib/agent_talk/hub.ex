@@ -351,7 +351,7 @@ defmodule AgentTalk.Hub do
           {{:error, :invalid_request, "invalid role filter"}, updated}
 
         true ->
-          case effective_wait(args, state) do
+          case effective_wait(args, updated) do
             {:error, _, _} = error ->
               {error, updated}
 
