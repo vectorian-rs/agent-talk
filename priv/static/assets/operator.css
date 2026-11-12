@@ -39,26 +39,34 @@
   .console-grid { display: grid; grid-template-columns: 15rem minmax(0, 1fr); align-items: start; gap: 2rem; }
   .agents-panel { border-top: 1px solid var(--line); position: sticky; top: 1rem; }
   .message-body a { color: inherit; text-decoration: underline; text-underline-offset: .15em; }
-  .ring-selector { display: grid; gap: .5rem; padding-top: 1rem; }
-  .history-export { display: grid; gap: .5rem; padding-top: 1rem; }
+  .ring-selector { display: flex; flex-direction: column; gap: .4rem; padding-top: 1rem; }
+  .ring-selector .small-label { color: var(--muted); font-size: .65rem; }
+  .ring-empty { color: var(--muted); font-size: .75rem; }
+  .ring-chips { display: flex; flex-wrap: wrap; gap: .35rem; }
+  .ring-chip { border: 1px solid var(--stroke); border-radius: 999px; padding: .2rem .65rem; background: var(--surface); color: var(--muted); font: .72rem var(--sans); cursor: pointer; white-space: nowrap; }
+  .ring-chip:hover { color: var(--ink); border-color: var(--ink); }
+  .ring-chip.is-selected { background: var(--ink); color: var(--on-ink); border-color: var(--ink); }
+  .history-export { display: flex; flex-direction: column; gap: .4rem; padding-block: .25rem .75rem; }
   .history-export label { color: var(--muted); font-size: .65rem; }
-  .history-export input, .history-export select, .history-export button { min-width: 0; width: 100%; border: 1px solid var(--stroke); border-radius: 5px; padding: .55rem .65rem; background: var(--surface); color: var(--ink); font: .75rem var(--sans); }
-  .history-export button { cursor: pointer; }
-  .ring-selector label { color: var(--muted); font-size: .65rem; }
-  .ring-selector select { width: 100%; min-width: 0; border: 1px solid var(--stroke); border-radius: 5px; padding: .55rem .65rem; background: var(--surface); color: var(--ink); font: .75rem var(--sans); }
+  .history-export-row { display: flex; flex-wrap: wrap; align-items: center; gap: .5rem; }
+  .history-export-row input, .history-export-row select, .history-export-row button { min-width: 0; border: 1px solid var(--stroke); border-radius: 5px; padding: .45rem .6rem; background: var(--surface); color: var(--ink); font: .72rem var(--sans); }
+  .history-export-row button { cursor: pointer; }
+  .history-export-row button:hover { color: var(--ink); border-color: var(--ink); }
   .panel-heading { display: flex; justify-content: space-between; align-items: center; gap: 1rem; padding-block: 1.2rem; }
   .panel-heading h2 { font-weight: 500; font-size: .95rem; letter-spacing: -.02em; }
+  .agents-panel .panel-heading h2 { font-size: 1.2rem; }
   .count-label { font: .72rem var(--mono); color: var(--muted); }
+  .agents-panel .count-label { font-size: .85rem; }
   .agent-list { padding: 0; margin: 0; list-style: none; }
   .agent-item { display: flex; gap: .75rem; padding-block: 1rem; border-top: 1px solid var(--line); }
-  .agent-avatar { flex: none; display: grid; place-items: center; width: 2.05rem; height: 2.05rem; border-radius: 6px; background: var(--soft); border: 1px solid var(--line); color: var(--drawing); font: .75rem var(--mono); }
+  .agent-avatar { flex: none; display: grid; place-items: center; width: 2.25rem; height: 2.25rem; border-radius: 6px; background: var(--soft); border: 1px solid var(--line); color: var(--drawing); font: .82rem var(--mono); }
   .avatar-pm { background: var(--assumption-bg); border-color: var(--assumption-line); color: var(--assumption-ink); }
   .agent-details { flex: 1; min-width: 0; }
-  .agent-name { font-size: .88rem; line-height: 1.35; font-weight: 500; overflow-wrap: anywhere; }
-  .agent-role { font-size: .75rem; color: var(--muted); margin-top: .15rem; }
-  .agent-purpose { font-size: .72rem; color: var(--muted); margin-top: .3rem; font-style: italic; overflow-wrap: anywhere; }
-  .agent-pending { font: .65rem var(--mono); color: var(--muted); margin-top: .5rem; }
-  .agent-activity { font: .6rem var(--mono); color: var(--muted); margin-top: .35rem; line-height: 1.6; }
+  .agent-name { font-size: 1.05rem; line-height: 1.35; font-weight: 500; overflow-wrap: anywhere; }
+  .agent-role { font-size: .85rem; color: var(--muted); margin-top: .2rem; }
+  .agent-purpose { font-size: .8rem; color: var(--muted); margin-top: .35rem; font-style: italic; overflow-wrap: anywhere; }
+  .agent-pending { font: .78rem var(--mono); color: var(--muted); margin-top: .55rem; }
+  .agent-activity { font: .72rem var(--mono); color: var(--muted); margin-top: .4rem; line-height: 1.6; }
   .agent-activity time { white-space: nowrap; }
   .presence-note { border-top: 1px solid var(--line); padding-top: 1.2rem; margin-top: .5rem; }
   .presence-note .small-label { font-size: .65rem; color: var(--muted); }
