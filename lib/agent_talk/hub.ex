@@ -334,22 +334,25 @@ defmodule AgentTalk.Hub do
     {{:ok, %{evicted: existing != nil}}, %{state | nodes: nodes}}
   end
 
-  # Fan one operator message out to every current member of a ring, reusing the
-  # agent send path's event, capacity check and delivery. handle_call's persist +
-  # archive + broadcast + wake-waiters wrapper then applies, exactly as for a send.
+  # Fan one operator message out to every current member of a ring, built and
+  # delivered through emit_event/5 from a synthetic operator sender (no ring
+  # project, so project is nil). handle_call's persist + archive + broadcast +
+  # wake-waiters wrapper then applies, exactly as for a send.
   defp dispatch({:broadcast, ring_id, message}, state, _now) do
     recipients = state |> ring_nodes(ring_id) |> Map.keys() |> Enum.sort()
 
     with :ok <- validate_message(message),
          :ok <- validate_recipients(recipients),
          :ok <- check_capacity(recipients, state) do
-      {message_id, state} = allocate_id("message", state)
-      event = operator_event(message_id, ring_id, message, recipients, state)
-      nodes = deliver(state.nodes, recipients, inbox_message(event))
-      history = Enum.take([event | state.messages], state.history_limit)
+      sender = %{
+        id: @operator_id,
+        role: @operator_role,
+        name: @operator_name,
+        project: nil,
+        ring_id: ring_id
+      }
 
-      {{:ok, %{message_id: event.id, delivered_to: recipients}},
-       %{state | nodes: nodes, messages: history}}
+      emit_event(state, sender, recipients, message, nil)
     else
       {:error, _, _} = error -> {error, state}
     end
@@ -619,28 +622,15 @@ defmodule AgentTalk.Hub do
          :ok <- validate_reply_to(Map.get(args, :reply_to)),
          {:ok, recipients} <- recipients(args, ring_nodes(state, node.ring_id), node.node_id),
          :ok <- check_capacity(recipients, state) do
-      {message_id, state} = allocate_id("message", state)
-
-      event = %{
-        id: message_id,
-        from: node.node_id,
-        ring_id: node.ring_id,
-        message: args.message,
-        sent_at: timestamp(state),
-        reply_to: Map.get(args, :reply_to),
-        to: recipients,
-        from_role: node.role,
-        from_name: node_name(node),
-        to_names: Map.new(recipients, &{&1, node_name(state.nodes[&1])}),
+      sender = %{
+        id: node.node_id,
+        role: node.role,
+        name: node_name(node),
         project: Map.get(node, :project),
-        received_by: []
+        ring_id: node.ring_id
       }
 
-      nodes = deliver(state.nodes, recipients, inbox_message(event))
-      history = Enum.take([event | state.messages], state.history_limit)
-
-      {{:ok, %{message_id: event.id, delivered_to: recipients}},
-       %{state | nodes: nodes, messages: history}}
+      emit_event(state, sender, recipients, args.message, Map.get(args, :reply_to))
     else
       {:error, _, _} = error -> {error, state}
     end
@@ -719,24 +709,33 @@ defmodule AgentTalk.Hub do
 
   defp validate_recipients(_), do: :ok
 
-  # The event an operator broadcast records: a real send event, but from the
-  # synthetic operator identity rather than a ring member. Shares every field the
-  # agent send path sets, so the log, archive and inbox copy all render it alike.
-  defp operator_event(id, ring_id, message, recipients, state) do
-    %{
+  # Single construction + delivery site for a ring message. An agent send and an
+  # operator broadcast each build a `sender` descriptor and call this, so the
+  # event schema (see @message_fields) stays defined in exactly one place and
+  # both paths archive, deliver and render identically.
+  defp emit_event(state, sender, recipients, message, reply_to) do
+    {id, state} = allocate_id("message", state)
+
+    event = %{
       id: id,
-      from: @operator_id,
-      ring_id: ring_id,
+      from: sender.id,
+      ring_id: sender.ring_id,
       message: message,
       sent_at: timestamp(state),
-      reply_to: nil,
+      reply_to: reply_to,
       to: recipients,
-      from_role: @operator_role,
-      from_name: @operator_name,
+      from_role: sender.role,
+      from_name: sender.name,
       to_names: Map.new(recipients, &{&1, node_name(state.nodes[&1])}),
-      project: Enum.find_value(recipients, &Map.get(state.nodes[&1], :project)),
+      project: sender.project,
       received_by: []
     }
+
+    nodes = deliver(state.nodes, recipients, inbox_message(event))
+    history = Enum.take([event | state.messages], state.history_limit)
+
+    {{:ok, %{message_id: event.id, delivered_to: recipients}},
+     %{state | nodes: nodes, messages: history}}
   end
 
   defp validate_message(message) when is_binary(message) do
