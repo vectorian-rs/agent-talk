@@ -52,6 +52,12 @@
   .history-export-row input, .history-export-row select, .history-export-row button { min-width: 0; border: 1px solid var(--stroke); border-radius: 5px; padding: .45rem .6rem; background: var(--surface); color: var(--ink); font: .72rem var(--sans); }
   .history-export-row button { cursor: pointer; }
   .history-export-row button:hover { color: var(--ink); border-color: var(--ink); }
+  .operator-broadcast { display: grid; gap: .5rem; padding-top: 1rem; }
+  .operator-broadcast label { color: var(--muted); font-size: .65rem; }
+  .operator-broadcast textarea { width: 100%; min-width: 0; resize: vertical; border: 1px solid var(--stroke); border-radius: 5px; padding: .55rem .65rem; background: var(--surface); color: var(--ink); font: .75rem var(--sans); }
+  .operator-broadcast .broadcast-send { cursor: pointer; border: 1px solid var(--stroke); border-radius: 5px; padding: .55rem .65rem; background: var(--surface); color: var(--ink); font: .75rem var(--sans); }
+  .operator-broadcast .broadcast-send:hover:not(:disabled) { color: var(--ink); border-color: var(--ink); }
+  .operator-broadcast .broadcast-send:disabled { color: var(--muted); cursor: not-allowed; }
   .panel-heading { display: flex; justify-content: space-between; align-items: center; gap: 1rem; padding-block: 1.2rem; }
   .panel-heading h2 { font-weight: 500; font-size: .95rem; letter-spacing: -.02em; }
   .agents-panel .panel-heading h2 { font-size: 1.2rem; }

@@ -458,6 +458,41 @@ defmodule AgentTalk.HubTest do
     assert :sys.get_state(hub).waiters == %{}
   end
 
+  test "an operator broadcast reaches every ring member as an operator message", %{
+    hub: hub,
+    pm: pm
+  } do
+    workers = [join(hub, pm), join(hub, pm)]
+    other_pm = register(hub, %{role: "pm"})
+    outsider = join(hub, other_pm)
+
+    assert {:ok, %{delivered_to: recipients, message_id: id}} =
+             Hub.broadcast(pm.ring_id, "Spec changed, pause", hub)
+
+    assert recipients == Enum.sort([pm.node_id | Enum.map(workers, & &1.node_id)])
+
+    for member <- [pm | workers] do
+      assert {:ok, %{messages: [%{id: ^id, from: "operator", message: "Spec changed, pause"}]}} =
+               receive_messages(hub, member)
+    end
+
+    assert {:ok, %{messages: []}} = receive_messages(hub, outsider), "scoped to the one ring"
+  end
+
+  test "an operator broadcast wakes a parked long-poll watcher immediately", %{hub: hub, pm: pm} do
+    worker = join(hub, pm)
+    parked = Task.async(fn -> Hub.list_nodes(auth(worker, %{wait_seconds: 10}), hub) end)
+    await_waiter(hub, worker.node_id)
+    assert {:ok, %{delivered_to: [_, _]}} = Hub.broadcast(pm.ring_id, "Wake up", hub)
+    assert {:ok, %{inbox: %{pending_messages: 1}}} = Task.await(parked, 1000)
+  end
+
+  test "an operator broadcast refuses an empty ring and a blank message", %{hub: hub, pm: pm} do
+    assert {:error, :invalid_request, _} = Hub.broadcast("ring-404", "Anyone?", hub)
+    assert {:error, :invalid_request, _} = Hub.broadcast(pm.ring_id, "   ", hub)
+    assert {:ok, %{messages: []}} = receive_messages(hub, pm), "a rejected broadcast delivers nothing"
+  end
+
   test "IDs are never reused after expiry or hub replacement within the server VM", %{
     hub: hub,
     clock: clock,

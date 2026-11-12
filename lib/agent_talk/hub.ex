@@ -22,6 +22,12 @@ defmodule AgentTalk.Hub do
   # definition; UI/archive-only metadata stays out of inbox payloads.
   @message_fields [:id, :from, :ring_id, :message, :sent_at, :reply_to]
 
+  # Synthetic sender for operator broadcasts. "operator" is not a registered
+  # node and owns no token, so it can address a ring but never authenticate.
+  @operator_id "operator"
+  @operator_role "operator"
+  @operator_name "Operator"
+
   # Longest wait a list_nodes call may be parked, under common 30-second
   # HTTP/proxy request timeouts (Anubis's plug allows 30s per request).
   @wait_cap_ms 25_000
@@ -54,6 +60,11 @@ defmodule AgentTalk.Hub do
   # Operator-initiated removal of a node (force-expire). Called in-process from
   # the trusted local dashboard, not over MCP, so it takes no token.
   def evict(node_id, server \\ __MODULE__), do: GenServer.call(server, {:evict, node_id})
+
+  # Operator-initiated broadcast to every member of a ring. Trusted local
+  # dashboard call (no token); delivers from a synthetic "operator" sender.
+  def broadcast(ring_id, message, server \\ __MODULE__),
+    do: GenServer.call(server, {:broadcast, ring_id, message})
 
   def topic, do: "agent-talk:operator"
 
@@ -321,6 +332,27 @@ defmodule AgentTalk.Hub do
   defp dispatch({:evict, node_id}, state, _now) do
     {existing, nodes} = Map.pop(state.nodes, node_id)
     {{:ok, %{evicted: existing != nil}}, %{state | nodes: nodes}}
+  end
+
+  # Fan one operator message out to every current member of a ring, reusing the
+  # agent send path's event, capacity check and delivery. handle_call's persist +
+  # archive + broadcast + wake-waiters wrapper then applies, exactly as for a send.
+  defp dispatch({:broadcast, ring_id, message}, state, _now) do
+    recipients = state |> ring_nodes(ring_id) |> Map.keys() |> Enum.sort()
+
+    with :ok <- validate_message(message),
+         :ok <- validate_recipients(recipients),
+         :ok <- check_capacity(recipients, state) do
+      {message_id, state} = allocate_id("message", state)
+      event = operator_event(message_id, ring_id, message, recipients, state)
+      nodes = deliver(state.nodes, recipients, inbox_message(event))
+      history = Enum.take([event | state.messages], state.history_limit)
+
+      {{:ok, %{message_id: event.id, delivered_to: recipients}},
+       %{state | nodes: nodes, messages: history}}
+    else
+      {:error, _, _} = error -> {error, state}
+    end
   end
 
   defp dispatch({:register, args}, state, now) do
@@ -680,6 +712,31 @@ defmodule AgentTalk.Hub do
     else
       :ok
     end
+  end
+
+  defp validate_recipients([]),
+    do: {:error, :invalid_request, "no agents are registered in this ring"}
+
+  defp validate_recipients(_), do: :ok
+
+  # The event an operator broadcast records: a real send event, but from the
+  # synthetic operator identity rather than a ring member. Shares every field the
+  # agent send path sets, so the log, archive and inbox copy all render it alike.
+  defp operator_event(id, ring_id, message, recipients, state) do
+    %{
+      id: id,
+      from: @operator_id,
+      ring_id: ring_id,
+      message: message,
+      sent_at: timestamp(state),
+      reply_to: nil,
+      to: recipients,
+      from_role: @operator_role,
+      from_name: @operator_name,
+      to_names: Map.new(recipients, &{&1, node_name(state.nodes[&1])}),
+      project: Enum.find_value(recipients, &Map.get(state.nodes[&1], :project)),
+      received_by: []
+    }
   end
 
   defp validate_message(message) when is_binary(message) do

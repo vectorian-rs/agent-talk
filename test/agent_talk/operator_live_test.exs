@@ -181,6 +181,21 @@ defmodule AgentTalk.OperatorLiveTest do
     refute Enum.any?(nodes, &(&1.node_id == worker.node_id))
   end
 
+  test "the operator broadcasts a message to the selected ring from the dashboard" do
+    pm = register(%{role: "pm", project: "hiko", name: "hiko / pm"})
+    worker = join(pm, "hiko / w-1")
+    {:ok, view, _} = live(build_conn(), "/")
+
+    view
+    |> form("#operator-broadcast", %{message: "Standup in five"})
+    |> render_submit()
+
+    assert has_element?(view, "#message-stream", "Standup in five")
+    assert has_element?(view, "#message-stream .party-name", "Operator")
+    assert {:ok, %{messages: [%{message: "Standup in five"}]}} =
+             Hub.communicate(auth(worker, %{action: "receive"}))
+  end
+
   defp reset_hub do
     :ok = Supervisor.terminate_child(AgentTalk.Supervisor, Hub)
     {:ok, _} = Supervisor.restart_child(AgentTalk.Supervisor, Hub)
