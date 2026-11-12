@@ -49,6 +49,19 @@ defmodule AgentTalk.OperatorLiveTest do
     refute credential_leak, "the human UI must not expose node or ring tokens"
     assert {:ok, %{messages: [%{id: ^id}]}} = Hub.communicate(auth(first, %{action: "receive"}))
     assert has_element?(view, "#message-#{id} .delivery-status", "Collected 1/2")
+
+    assert {:ok, %{message_id: reply}} =
+             Hub.communicate(
+               auth(first, %{
+                 action: "send",
+                 to: [pm.node_id],
+                 message: "View built",
+                 reply_to: id
+               })
+             )
+
+    assert has_element?(view, "#message-#{reply} .reply-ref", "↩ #{id}")
+    refute has_element?(view, "#message-#{id} .reply-ref")
     {:ok, %{nodes: nodes}} = Hub.snapshot()
     active = Enum.find(nodes, &(&1.node_id == first.node_id))
 

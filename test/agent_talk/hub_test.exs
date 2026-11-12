@@ -270,6 +270,37 @@ defmodule AgentTalk.HubTest do
     assert {:ok, %{messages: []}} = receive_messages(hub, worker)
   end
 
+  test "reply references reach recipients and history without parent existence checks", %{
+    hub: hub,
+    pm: pm
+  } do
+    worker = join(hub, pm)
+
+    assert {:ok, %{message_id: task}} =
+             send_message(hub, pm, %{to: [worker.node_id], message: "Task"})
+
+    assert {:ok, %{messages: [%{id: ^task, reply_to: nil}]}} = receive_messages(hub, worker)
+
+    assert {:ok, %{message_id: done}} =
+             send_message(hub, worker, %{to: [pm.node_id], message: "Done", reply_to: task})
+
+    assert {:ok, %{messages: [%{id: ^done, reply_to: ^task}]}} = receive_messages(hub, pm)
+    assert {:ok, %{messages: [%{id: ^done, reply_to: ^task} | _]}} = Hub.snapshot(hub)
+
+    pruned = "message-999999"
+
+    assert {:ok, _} =
+             send_message(hub, pm, %{to: [worker.node_id], message: "Ref", reply_to: pruned})
+
+    for invalid <- ["", "x y", String.duplicate("a", 65), 5] do
+      assert {:error, :invalid_request, "reply_to must be a message id"} =
+               send_message(hub, pm, %{to: [worker.node_id], message: "Bad", reply_to: invalid})
+    end
+
+    assert {:error, :invalid_request, _} =
+             Hub.communicate(auth(worker, %{action: "receive", reply_to: done}), hub)
+  end
+
   test "public snapshots retain ring routes without exposing credentials or draining inboxes", %{
     hub: hub,
     pm: pm

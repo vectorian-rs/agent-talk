@@ -90,6 +90,42 @@ defmodule AgentTalk.HistoryTest do
              History.daily(c.history_file, ~D[2026-11-10])
   end
 
+  test "reply references round-trip through the archive; rows written before them decode as nil",
+       c do
+    assert {:ok, %{message_id: task}} = send_message(c, [c.worker.node_id], "Task")
+
+    assert {:ok, %{message_id: done}} =
+             Hub.communicate(
+               auth(c.worker, %{
+                 action: "send",
+                 to: [c.pm.node_id],
+                 message: "Done",
+                 reply_to: task
+               }),
+               c.hub
+             )
+
+    assert {:ok, events} = History.daily(c.history_file, ~D[2026-11-10])
+    assert Enum.map(events, &{&1.id, &1.reply_to}) == [{task, nil}, {done, task}]
+
+    db = :sys.get_state(c.hub).history_db
+    pending = History.pending(db, [c.pm.node_id, c.worker.node_id])
+    assert {:ok, [%{reply_to: nil}, %{id: ^done, reply_to: ^task}]} = pending
+
+    text = IO.iodata_to_binary(History.markdown(~D[2026-11-10], events))
+    assert text =~ "Reply-To: #{task}"
+    assert length(Regex.scan(~r/Reply-To:/, text)) == 1
+
+    :ok =
+      SQLite.execute(
+        db,
+        "UPDATE messages SET event_json = json_remove(event_json, '$.reply_to')"
+      )
+
+    assert {:ok, old_rows} = History.daily(c.history_file, ~D[2026-11-10])
+    assert Enum.map(old_rows, & &1.reply_to) == [nil, nil]
+  end
+
   test "fan-out collection timestamps are recorded independently for each recipient", c do
     other = register(c.hub, %{role: "worker", ring_token: c.pm.ring_token})
     assert {:ok, _} = send_message(c, [c.worker.node_id, other.node_id], "Task")

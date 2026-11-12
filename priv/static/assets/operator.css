@@ -86,6 +86,7 @@
   .message-body { margin-top: .85rem; font-size: .9rem; line-height: 1.75; white-space: pre-wrap; overflow-wrap: anywhere; }
   .message-footer { display: flex; justify-content: space-between; gap: .75rem; align-items: center; margin-top: 1rem; }
   .message-kind { color: var(--muted); font-size: .58rem; letter-spacing: .04em; }
+  .reply-ref { font-family: var(--mono); letter-spacing: 0; }
   .delivery-status { flex: none; font: .65rem var(--mono); color: var(--muted); }
   .delivery-collected { color: var(--online); }
   .delivery-status > span { display: inline-block; margin-right: .2rem; }
