@@ -108,21 +108,25 @@ export async function connect(server) {
 export async function inbox(file, client) {
   const member = await readMembership(file);
   if (!member) throw error("No saved AgentTalk registration at " + file + ".");
-  const result = await client.call("list_nodes", { node_id: member.node_id, token: member.token });
-  if (result.ring_id !== member.ring_id || !Number.isInteger(result.inbox?.pending_messages)) {
+  const { ring_id, inbox } = await client.call("list_nodes",
+    { node_id: member.node_id, token: member.token });
+  // Same shape check the watcher applies: a consistent, non-negative count with
+  // a next id present exactly when mail is pending.
+  if (ring_id !== member.ring_id || !Number.isInteger(inbox?.pending_messages) ||
+      inbox.pending_messages < 0 ||
+      (inbox.pending_messages === 0 ? inbox.next_message_id !== null :
+        typeof inbox.next_message_id !== "string" || inbox.next_message_id.length === 0)) {
     throw new ClientError("protocol", "AgentTalk returned unexpected inbox metadata.");
   }
-  return { node_id: member.node_id, pending: result.inbox.pending_messages,
-    next: result.inbox.next_message_id };
+  return { node_id: member.node_id, pending: inbox.pending_messages, next: inbox.next_message_id };
 }
 
 // The server URL a hook should use: an explicit --server, else the project's
-// agent-talk.toml. Kept here so the CLI stays declarative.
+// agent-talk.toml. With --server we never read the config, so a broken toml is
+// irrelevant; without it, loadProject surfaces its own missing/invalid error.
 export async function inboxServer(root, options) {
-  const config = await loadProject(root).catch(() => null);
-  const server = options.server ?? config?.server;
-  if (!server) throw error("Pass --server <url> or run agent-talk inbox from a project with agent-talk.toml.");
-  return server;
+  if (options.server) return options.server;
+  return (await loadProject(root)).server;
 }
 
 export async function provision(root, config, label, client) {

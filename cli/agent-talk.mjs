@@ -30,7 +30,8 @@ try {
     process.once("SIGTERM", forward);
     process.exitCode = await new Promise((resolve, reject) => { child.once("error", reject); child.once("exit", (code) => resolve(code ?? 1)); });
     process.removeListener("SIGTERM", forward);
-  } else if (command === "inbox" && positionals.length === 2) {
+  } else if (command === "inbox" && positionals.length === 2 &&
+             Object.keys(values).every((key) => key === "server")) {
     const client = new McpClient(await inboxServer(root, values));
     const { node_id, pending, next } = await inbox(label, client);
     console.log(pending > 0 ?

@@ -137,6 +137,9 @@ test("inbox rejects a missing registration and a foreign-ring or malformed reply
   for (const bad of [
     { ring_id: "other", inbox: { pending_messages: 0, next_message_id: null } },
     { ring_id: "ring-test", inbox: { pending_messages: "x", next_message_id: null } },
+    { ring_id: "ring-test", inbox: { pending_messages: -1, next_message_id: null } },
+    { ring_id: "ring-test", inbox: { pending_messages: 0, next_message_id: "m-1" } },
+    { ring_id: "ring-test", inbox: { pending_messages: 2, next_message_id: null } },
   ]) {
     await assert.rejects(inbox(file, { call: async () => bad }), /unexpected inbox metadata/);
   }
@@ -145,7 +148,7 @@ test("inbox rejects a missing registration and a foreign-ring or malformed reply
 test("inboxServer prefers an explicit server and falls back to the project config", async (t) => {
   const root = await project(t);
   assert.equal(await inboxServer(root, { server: "http://127.0.0.1:9/mcp" }), "http://127.0.0.1:9/mcp");
-  await assert.rejects(inboxServer(root, {}), /Pass --server/);
+  await assert.rejects(inboxServer(root, {}), /agent-talk\.toml/);
   const config = await initProject(root);
   assert.equal(await inboxServer(root, {}), config.server);
 });

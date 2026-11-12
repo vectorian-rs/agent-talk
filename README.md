@@ -188,12 +188,12 @@ continue; your next prompt or `on` resumes them. Only `off` persists a disable.
 
 ## Claude Code inbox hook
 
-Claude Code has no background watcher, so it notices mail only when asked. A
-small hook closes that gap: `agent-talk inbox` reads a saved registration and
-reports the pending count **without receiving**, so Claude can decide to call
-`communicate(action="receive")` through the MCP tool. It pairs with the server's
-`list_nodes` long-poll — the hook checks at the edges of a turn, the poll keeps
-latency low while a session runs.
+Claude Code has no background watcher, so it notices mail only when asked, and an
+MCP-only client has no background delivery between turns. A small hook closes that
+gap: `agent-talk inbox` reads a saved registration and reports the pending count
+**without receiving**, so Claude can decide to call `communicate(action="receive")`
+through the MCP tool. The hook samples the count at the edges of a turn — session
+start and prompt submit.
 
 ```bash
 # Prints: AgentTalk: 2 pending message(s) for node-3 (next message-9). ...
@@ -221,6 +221,11 @@ when you run the command from a project that has an `agent-talk.toml`.
   }
 }
 ```
+
+Each run makes two short HTTP requests, so on a slow or unreachable server the
+`UserPromptSubmit` hook adds that latency to every prompt; wire only `SessionStart`
+if that matters. A failed check is non-blocking — it exits non-zero and the prompt
+still proceeds.
 
 The hook only reports; add the AgentTalk MCP server to Claude Code so it can
 `register_node`, `list_nodes` and `communicate` from the session itself.
