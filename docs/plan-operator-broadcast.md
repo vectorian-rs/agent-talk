@@ -44,6 +44,10 @@ reuses the agent send path wholesale — the same `event` shape, `deliver/3` fan
 - Display: the message log already renders a multi-recipient message as
   "Broadcast · N recipients" and labels the sender from `from_name`, so an
   operator broadcast shows as from "Operator" with no new rendering code.
+- One-way: an operator broadcast is an announcement. The `operator` sender has
+  no inbox, so agents must not reply to it — a response belongs to the agent's
+  PM, over the normal send path. This keeps the send path free of a special
+  "reply to the operator" case; see "Deliberately cut".
 
 ## Acceptance criteria
 

@@ -30,7 +30,8 @@ defmodule AgentTalk.Web.OperatorLive do
 
   def handle_event("select_ring", %{"ring" => ring}, socket) do
     if Enum.any?(socket.assigns.rings, &(&1.id == ring)) do
-      {:noreply, socket |> assign(ring: ring, party: "all", query: "") |> scope_ring()}
+      {:noreply,
+       socket |> assign(ring: ring, party: "all", query: "", compose: "") |> scope_ring()}
     else
       {:noreply, socket}
     end
@@ -76,7 +77,15 @@ defmodule AgentTalk.Web.OperatorLive do
 
     socket
     |> assign(snapshot: snapshot, rings: rings, ring: ring)
+    |> drop_stale_compose(previous, ring)
     |> scope_ring()
+  end
+
+  # A draft belongs to the ring it was typed in. If the selected ring changes —
+  # including the fallback when that ring disappears — drop the draft so a
+  # broadcast can never land in a ring the operator wasn't composing for.
+  defp drop_stale_compose(socket, previous, ring) do
+    if previous != nil and previous != ring, do: assign(socket, :compose, ""), else: socket
   end
 
   defp ring_options(snapshot) do
@@ -158,6 +167,14 @@ defmodule AgentTalk.Web.OperatorLive do
   end
 
   defp clock(iso8601), do: String.slice(iso8601, 11, 8)
+
+  defp ring_label(rings, id) do
+    case Enum.find(rings, &(&1.id == id)) do
+      %{label: label} -> label
+      _ -> id
+    end
+  end
+
   defp role_name("pm"), do: "PM"
   defp role_name(role), do: String.capitalize(role)
 
@@ -236,6 +253,7 @@ defmodule AgentTalk.Web.OperatorLive do
                   phx-click="select_ring"
                   phx-value-ring={ring.id}
                   aria-pressed={@ring == ring.id}
+                  title={ring.label}
                 >{ring.label}</button>
               </div>
             </div>
@@ -259,7 +277,7 @@ defmodule AgentTalk.Web.OperatorLive do
                 type="submit"
                 class="broadcast-send"
                 disabled={String.trim(@compose) == ""}
-                data-confirm={"Send this message to all #{length(@nodes)} agent(s) in the selected ring?"}
+                data-confirm={"Broadcast to all #{length(@nodes)} agent(s) in #{ring_label(@rings, @ring)}?"}
               >
                 Broadcast
               </button>

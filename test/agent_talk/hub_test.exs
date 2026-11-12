@@ -490,7 +490,50 @@ defmodule AgentTalk.HubTest do
   test "an operator broadcast refuses an empty ring and a blank message", %{hub: hub, pm: pm} do
     assert {:error, :invalid_request, _} = Hub.broadcast("ring-404", "Anyone?", hub)
     assert {:error, :invalid_request, _} = Hub.broadcast(pm.ring_id, "   ", hub)
-    assert {:ok, %{messages: []}} = receive_messages(hub, pm), "a rejected broadcast delivers nothing"
+
+    assert {:ok, %{messages: []}} = receive_messages(hub, pm),
+           "a rejected broadcast delivers nothing"
+  end
+
+  test "a long-poll timeout does not revive a node whose lease expired while parked", %{
+    hub: hub,
+    clock: clock,
+    pm: pm
+  } do
+    worker = join(hub, pm)
+    parked = Task.async(fn -> Hub.list_nodes(auth(worker, %{wait_seconds: 10}), hub) end)
+    await_waiter(hub, worker.node_id)
+    {_from, timer, _args} = :sys.get_state(hub).waiters[worker.node_id]
+
+    # Lease lapses while parked, then the park's timeout fires.
+    Agent.update(clock, fn _ -> 1001 end)
+    send(hub, {:timeout, timer, {:waiter_timeout, worker.node_id}})
+
+    assert {:error, :expired, _} = Task.await(parked, 1000)
+    refute Map.has_key?(:sys.get_state(hub).nodes, worker.node_id), "expiry must not be undone"
+  end
+
+  test "a long-poll wake does not revert a label changed during the wait", %{hub: hub, pm: pm} do
+    worker = join(hub, pm)
+
+    parked =
+      Task.async(fn -> Hub.list_nodes(auth(worker, %{wait_seconds: 10, name: "stale"}), hub) end)
+
+    await_waiter(hub, worker.node_id)
+
+    # A newer renewal changes the name while the caller is parked.
+    assert {:ok, _} =
+             Hub.register(
+               %{node_id: worker.node_id, role: "worker", token: worker.token, name: "fresh"},
+               hub
+             )
+
+    # Mail wakes the waiter, which replays its original (stale-name) request.
+    assert {:ok, _} = send_message(hub, pm, %{to: [worker.node_id], message: "wake"})
+    assert {:ok, _} = Task.await(parked, 1000)
+
+    {:ok, %{nodes: nodes}} = Hub.list_nodes(auth(pm), hub)
+    assert Enum.find(nodes, &(&1.node_id == worker.node_id)).name == "fresh"
   end
 
   test "IDs are never reused after expiry or hub replacement within the server VM", %{
