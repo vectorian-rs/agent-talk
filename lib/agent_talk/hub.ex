@@ -22,6 +22,12 @@ defmodule AgentTalk.Hub do
   # definition; UI/archive-only metadata stays out of inbox payloads.
   @message_fields [:id, :from, :ring_id, :message, :sent_at, :reply_to]
 
+  # Synthetic sender for operator broadcasts. "operator" is not a registered
+  # node and owns no token, so it can address a ring but never authenticate.
+  @operator_id "operator"
+  @operator_role "operator"
+  @operator_name "Operator"
+
   # Longest wait a list_nodes call may be parked, under common 30-second
   # HTTP/proxy request timeouts (Anubis's plug allows 30s per request).
   @wait_cap_ms 25_000
@@ -54,6 +60,11 @@ defmodule AgentTalk.Hub do
   # Operator-initiated removal of a node (force-expire). Called in-process from
   # the trusted local dashboard, not over MCP, so it takes no token.
   def evict(node_id, server \\ __MODULE__), do: GenServer.call(server, {:evict, node_id})
+
+  # Operator-initiated broadcast to every member of a ring. Trusted local
+  # dashboard call (no token); delivers from a synthetic "operator" sender.
+  def broadcast(ring_id, message, server \\ __MODULE__),
+    do: GenServer.call(server, {:broadcast, ring_id, message})
 
   def topic, do: "agent-talk:operator"
 
@@ -323,6 +334,30 @@ defmodule AgentTalk.Hub do
     {{:ok, %{evicted: existing != nil}}, %{state | nodes: nodes}}
   end
 
+  # Fan one operator message out to every current member of a ring, built and
+  # delivered through emit_event/5 from a synthetic operator sender (no ring
+  # project, so project is nil). handle_call's persist + archive + broadcast +
+  # wake-waiters wrapper then applies, exactly as for a send.
+  defp dispatch({:broadcast, ring_id, message}, state, _now) do
+    recipients = state |> ring_nodes(ring_id) |> Map.keys() |> Enum.sort()
+
+    with :ok <- validate_message(message),
+         :ok <- validate_recipients(recipients),
+         :ok <- check_capacity(recipients, state) do
+      sender = %{
+        id: @operator_id,
+        role: @operator_role,
+        name: @operator_name,
+        project: nil,
+        ring_id: ring_id
+      }
+
+      emit_event(state, sender, recipients, message, nil)
+    else
+      {:error, _, _} = error -> {error, state}
+    end
+  end
+
   defp dispatch({:register, args}, state, now) do
     role = Map.get(args, :role)
     id = Map.get(args, :node_id)
@@ -587,28 +622,15 @@ defmodule AgentTalk.Hub do
          :ok <- validate_reply_to(Map.get(args, :reply_to)),
          {:ok, recipients} <- recipients(args, ring_nodes(state, node.ring_id), node.node_id),
          :ok <- check_capacity(recipients, state) do
-      {message_id, state} = allocate_id("message", state)
-
-      event = %{
-        id: message_id,
-        from: node.node_id,
-        ring_id: node.ring_id,
-        message: args.message,
-        sent_at: timestamp(state),
-        reply_to: Map.get(args, :reply_to),
-        to: recipients,
-        from_role: node.role,
-        from_name: node_name(node),
-        to_names: Map.new(recipients, &{&1, node_name(state.nodes[&1])}),
+      sender = %{
+        id: node.node_id,
+        role: node.role,
+        name: node_name(node),
         project: Map.get(node, :project),
-        received_by: []
+        ring_id: node.ring_id
       }
 
-      nodes = deliver(state.nodes, recipients, inbox_message(event))
-      history = Enum.take([event | state.messages], state.history_limit)
-
-      {{:ok, %{message_id: event.id, delivered_to: recipients}},
-       %{state | nodes: nodes, messages: history}}
+      emit_event(state, sender, recipients, args.message, Map.get(args, :reply_to))
     else
       {:error, _, _} = error -> {error, state}
     end
@@ -680,6 +702,40 @@ defmodule AgentTalk.Hub do
     else
       :ok
     end
+  end
+
+  defp validate_recipients([]),
+    do: {:error, :invalid_request, "no agents are registered in this ring"}
+
+  defp validate_recipients(_), do: :ok
+
+  # Single construction + delivery site for a ring message. An agent send and an
+  # operator broadcast each build a `sender` descriptor and call this, so the
+  # event schema (see @message_fields) stays defined in exactly one place and
+  # both paths archive, deliver and render identically.
+  defp emit_event(state, sender, recipients, message, reply_to) do
+    {id, state} = allocate_id("message", state)
+
+    event = %{
+      id: id,
+      from: sender.id,
+      ring_id: sender.ring_id,
+      message: message,
+      sent_at: timestamp(state),
+      reply_to: reply_to,
+      to: recipients,
+      from_role: sender.role,
+      from_name: sender.name,
+      to_names: Map.new(recipients, &{&1, node_name(state.nodes[&1])}),
+      project: sender.project,
+      received_by: []
+    }
+
+    nodes = deliver(state.nodes, recipients, inbox_message(event))
+    history = Enum.take([event | state.messages], state.history_limit)
+
+    {{:ok, %{message_id: event.id, delivered_to: recipients}},
+     %{state | nodes: nodes, messages: history}}
   end
 
   defp validate_message(message) when is_binary(message) do

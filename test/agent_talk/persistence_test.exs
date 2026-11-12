@@ -226,6 +226,25 @@ defmodule AgentTalk.PersistenceTest do
                receive_messages(hub, survivor)
     end
 
+    test "an operator broadcast is archived, so recipients receive it and it survives a restart",
+         %{hub: hub, opts: opts} do
+      pm = register(hub, %{role: "pm"})
+      worker = register(hub, %{role: "worker", ring_token: pm.ring_token})
+
+      assert {:ok, %{message_id: id}} = Hub.broadcast(pm.ring_id, "Deploy now", hub)
+
+      # Without the archive row this receive would hit a missing collected_json
+      # lookup and roll back with a :storage error, wedging the inbox.
+      assert {:ok, %{messages: [%{id: ^id, from: "operator", message: "Deploy now"}]}} =
+               receive_messages(hub, pm)
+
+      # The worker never drained its copy; it recovers the broadcast after a restart.
+      hub = restart(opts)
+
+      assert {:ok, %{messages: [%{id: ^id, message: "Deploy now"}]}} =
+               receive_messages(hub, worker)
+    end
+
     test "recovery is not bounded by the live history window", %{opts: opts} do
       opts = Keyword.put(opts, :history_limit, 3)
       hub = restart(opts)

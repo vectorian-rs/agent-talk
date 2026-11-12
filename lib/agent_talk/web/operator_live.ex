@@ -10,7 +10,13 @@ defmodule AgentTalk.Web.OperatorLive do
 
     {:ok,
      socket
-     |> assign(party: "all", query: "", ring: nil, review_date: Date.to_iso8601(Date.utc_today()))
+     |> assign(
+       party: "all",
+       query: "",
+       ring: nil,
+       compose: "",
+       review_date: Date.to_iso8601(Date.utc_today())
+     )
      |> refresh()}
   end
 
@@ -41,6 +47,22 @@ defmodule AgentTalk.Web.OperatorLive do
   end
 
   def handle_event("clear_error", _params, socket), do: {:noreply, clear_flash(socket)}
+
+  # Track the compose textarea so a concurrent refresh can't wipe a half-typed
+  # message; the value is bound to @compose on every render.
+  def handle_event("compose", %{"message" => message}, socket),
+    do: {:noreply, assign(socket, :compose, message)}
+
+  def handle_event("broadcast", %{"message" => message}, socket) do
+    # Trusted local surface: broadcasting into the selected ring needs no token.
+    # On success the hub's pubsub refresh re-renders every view and we clear the
+    # box; a capacity or storage error is surfaced and the draft is kept.
+    case socket.assigns.ring && Hub.broadcast(socket.assigns.ring, message) do
+      {:ok, _} -> {:noreply, assign(socket, :compose, "")}
+      {:error, _code, msg} -> {:noreply, put_flash(socket, :error, msg)}
+      nil -> {:noreply, socket}
+    end
+  end
 
   defp refresh(socket) do
     {:ok, snapshot} = Hub.snapshot()
@@ -217,6 +239,31 @@ defmodule AgentTalk.Web.OperatorLive do
                 >{ring.label}</button>
               </div>
             </div>
+            <form
+              :if={@ring && @nodes != []}
+              id="operator-broadcast"
+              class="operator-broadcast"
+              phx-change="compose"
+              phx-submit="broadcast"
+            >
+              <label for="broadcast-message" class="small-label">Broadcast to ring</label>
+              <textarea
+                id="broadcast-message"
+                name="message"
+                rows="2"
+                placeholder="Message every agent in this ring…"
+                phx-debounce="150"
+                autocomplete="off"
+              >{@compose}</textarea>
+              <button
+                type="submit"
+                class="broadcast-send"
+                disabled={String.trim(@compose) == ""}
+                data-confirm={"Send this message to all #{length(@nodes)} agent(s) in the selected ring?"}
+              >
+                Broadcast
+              </button>
+            </form>
             <div class="panel-heading">
               <h2 id="agents-title">Registered agents</h2><span class="count-label">{length(@nodes)}</span>
             </div>

@@ -117,17 +117,15 @@ defmodule AgentTalk.History do
 
   def record(nil, _request, _reply, _state, _at), do: :ok
 
-  def record(db, {:communicate, %{action: "send"}}, {:ok, %{message_id: id}}, state, _at) do
-    event = Enum.find(state.messages, &(&1.id == id))
+  def record(db, {:communicate, %{action: "send"}}, {:ok, %{message_id: id}}, state, _at),
+    do: archive_event(db, id, state)
 
-    with {:ok, json} <- Jason.encode(Map.take(event, @fields)) do
-      run(
-        db,
-        "INSERT INTO messages(message_id, ring_id, sent_date, event_json) VALUES (?, ?, ?, ?)",
-        [id, event.ring_id, String.slice(event.sent_at, 0, 10), json]
-      )
-    end
-  end
+  # An operator broadcast archives exactly like a send: the delivered event sits
+  # in state.messages and the reply carries its id. Without this clause the row
+  # is never written, and a recipient's later receive finds no archived message,
+  # fails its collected_json lookup, and the whole receive is rolled back.
+  def record(db, {:broadcast, _ring_id, _message}, {:ok, %{message_id: id}}, state, _at),
+    do: archive_event(db, id, state)
 
   def record(
         db,
@@ -166,6 +164,18 @@ defmodule AgentTalk.History do
   end
 
   def record(_db, _request, _reply, _state, _at), do: :ok
+
+  defp archive_event(db, id, state) do
+    event = Enum.find(state.messages, &(&1.id == id))
+
+    with {:ok, json} <- Jason.encode(Map.take(event, @fields)) do
+      run(
+        db,
+        "INSERT INTO messages(message_id, ring_id, sent_date, event_json) VALUES (?, ?, ?, ?)",
+        [id, event.ring_id, String.slice(event.sent_at, 0, 10), json]
+      )
+    end
+  end
 
   def daily(file, day, ring \\ nil)
 
