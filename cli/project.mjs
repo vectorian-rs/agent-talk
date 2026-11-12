@@ -102,6 +102,33 @@ export async function connect(server) {
   return client;
 }
 
+// Non-draining inbox check for a saved registration: reports the pending count
+// and next id without receiving, so a session-start hook can surface mail while
+// the MCP communicate tool stays the only consumer.
+export async function inbox(file, client) {
+  const member = await readMembership(file);
+  if (!member) throw error("No saved AgentTalk registration at " + file + ".");
+  const { ring_id, inbox } = await client.call("list_nodes",
+    { node_id: member.node_id, token: member.token });
+  // Same shape check the watcher applies: a consistent, non-negative count with
+  // a next id present exactly when mail is pending.
+  if (ring_id !== member.ring_id || !Number.isInteger(inbox?.pending_messages) ||
+      inbox.pending_messages < 0 ||
+      (inbox.pending_messages === 0 ? inbox.next_message_id !== null :
+        typeof inbox.next_message_id !== "string" || inbox.next_message_id.length === 0)) {
+    throw new ClientError("protocol", "AgentTalk returned unexpected inbox metadata.");
+  }
+  return { node_id: member.node_id, pending: inbox.pending_messages, next: inbox.next_message_id };
+}
+
+// The server URL a hook should use: an explicit --server, else the project's
+// agent-talk.toml. With --server we never read the config, so a broken toml is
+// irrelevant; without it, loadProject surfaces its own missing/invalid error.
+export async function inboxServer(root, options) {
+  if (options.server) return options.server;
+  return (await loadProject(root)).server;
+}
+
 export async function provision(root, config, label, client) {
   if (!labels(config).includes(label)) throw error("Choose pm or a configured worker label.");
   await prepare(root, config);

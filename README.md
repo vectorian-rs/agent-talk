@@ -14,7 +14,7 @@ Use the left-hand ring selector to watch one team's agents and messages.
 | Client | Message pickup |
 | --- | --- |
 | Pi with the optional extension | Checks every 10 seconds without model turns for empty checks; wakes idle agents or queues a follow-up while busy. |
-| MCP alone, including Claude and Codex | Ask agents to receive manually. Automatic Claude/Codex adapters are not implemented. |
+| MCP alone, including Claude and Codex | Ask agents to receive manually, or wire the [Claude Code inbox hook](#claude-code-inbox-hook) to surface pending mail at the edges of a turn. Automatic Claude/Codex adapters are not implemented. |
 
 AgentTalk is optional and preserves your repository's work and approval rules.
 See the [integration contract](integrations/README.md) for host responsibilities.
@@ -185,6 +185,50 @@ continue; your next prompt or `on` resumes them. Only `off` persists a disable.
 | `invalid node token` | Reload credentials; if lost, rejoin as a new identity. Another node's token cannot be reclaimed. |
 | `invalid ring token` | Check the server and its membership file. A lost/deleted store needs a new PM ring and worker invitations; client files cannot restore it. |
 | Unknown/expired recipient | Rediscover and confirm its identity before resending. Rejected sends queue nothing. |
+
+## Claude Code inbox hook
+
+Claude Code has no background watcher, so it notices mail only when asked, and an
+MCP-only client has no background delivery between turns. A small hook closes that
+gap: `agent-talk inbox` reads a saved registration and reports the pending count
+**without receiving**, so Claude can decide to call `communicate(action="receive")`
+through the MCP tool. The hook samples the count at the edges of a turn — session
+start and prompt submit.
+
+```bash
+# Prints: AgentTalk: 2 pending message(s) for node-3 (next message-9). ...
+#     or: AgentTalk: inbox empty for node-3.
+node /path/to/agent-talk/cli/agent-talk.mjs \
+  inbox /path/to/.agent-talk/delivery/pm.json --server http://127.0.0.1:4000/mcp
+```
+
+Wire it into `~/.claude/settings.json` (or a project `.claude/settings.json`) so
+its output joins the session context at the start of each session and before each
+prompt. Replace the membership path and server with your own; drop `--server`
+when you run the command from a project that has an `agent-talk.toml`.
+
+```json
+{
+  "hooks": {
+    "SessionStart": [
+      { "hooks": [ { "type": "command",
+        "command": "node /path/to/agent-talk/cli/agent-talk.mjs inbox /path/to/.agent-talk/delivery/pm.json --server http://127.0.0.1:4000/mcp" } ] }
+    ],
+    "UserPromptSubmit": [
+      { "hooks": [ { "type": "command",
+        "command": "node /path/to/agent-talk/cli/agent-talk.mjs inbox /path/to/.agent-talk/delivery/pm.json --server http://127.0.0.1:4000/mcp" } ] }
+    ]
+  }
+}
+```
+
+Each run makes two short HTTP requests, so on a slow or unreachable server the
+`UserPromptSubmit` hook adds that latency to every prompt; wire only `SessionStart`
+if that matters. A failed check is non-blocking — it exits non-zero and the prompt
+still proceeds.
+
+The hook only reports; add the AgentTalk MCP server to Claude Code so it can
+`register_node`, `list_nodes` and `communicate` from the session itself.
 
 ## Membership file examples
 
