@@ -115,6 +115,13 @@ defmodule AgentTalk.MCPTest do
       )
     end
 
+    status = call(AgentTalk.TestPM, "communicate", auth(pm, %{action: "status"}))
+    build_it = Enum.find(status["sent"], &(&1["id"] == sent["message_id"]))
+    assert build_it, "status must list the sender's own message"
+
+    assert Enum.sort(build_it["received_by"]) == ids and build_it["pending"] == [],
+           "status must show every recipient received the assignment"
+
     inbox = call(AgentTalk.TestPM, "communicate", auth(pm, %{action: "receive"}))
     assert Enum.map(inbox["messages"], & &1["from"]) |> Enum.sort() == ids
 

@@ -537,10 +537,15 @@ defmodule AgentTalk.Hub do
     end
   end
 
+  # Only send carries addressing and content; receive and status reject those
+  # fields so a misdirected one is an error, not a silently ignored no-op.
+  defp content_fields?(args) do
+    Enum.any?([:to, :to_role, :message, :reply_to], &(Map.get(args, &1) != nil))
+  end
+
   defp communicate(%{action: "receive"} = args, state, node) do
     cond do
-      Map.get(args, :to) != nil or Map.get(args, :to_role) != nil or
-        Map.get(args, :message) != nil or Map.get(args, :reply_to) != nil ->
+      content_fields?(args) ->
         {{:error, :invalid_request, "receive takes no to, to_role, message or reply_to fields"},
          state}
 
@@ -594,6 +599,31 @@ defmodule AgentTalk.Hub do
        %{state | nodes: nodes, messages: history}}
     else
       {:error, _, _} = error -> {error, state}
+    end
+  end
+
+  # Read-only delivery visibility for the sender: its own recent sends still in
+  # the history window, each with who has received it and who is still pending.
+  # Derives entirely from state.messages; mutates nothing (the lease was already
+  # renewed by authenticate/3).
+  defp communicate(%{action: "status"} = args, state, node) do
+    if content_fields?(args) do
+      {{:error, :invalid_request, "status takes no to, to_role, message or reply_to fields"},
+       state}
+    else
+      sent =
+        for event <- state.messages, event.from == node.node_id do
+          %{
+            id: event.id,
+            to: event.to,
+            received_by: event.received_by,
+            pending: event.to -- event.received_by,
+            sent_at: event.sent_at,
+            reply_to: event.reply_to
+          }
+        end
+
+      {{:ok, %{sent: sent}}, state}
     end
   end
 

@@ -9,11 +9,13 @@ defmodule AgentTalk.Tools.Communicate do
   Call receive between tasks to collect messages; use register_node for an idle heartbeat.
   When answering a specific message, set reply_to to its id so the answer can be
   matched to the task it resolves.
+  Use status to see your own recent sends and which recipients have received each,
+  without removing anything.
   """
   use Anubis.Server.Component, type: :tool, name: "communicate"
 
   schema do
-    field(:action, {:enum, ["send", "receive"]}, required: true)
+    field(:action, {:enum, ["send", "receive", "status"]}, required: true)
     field(:node_id, :string, required: true, description: "Your registered node ID")
     field(:token, :string, required: true, description: "Your private registration token")
     field(:to, {:list, :string}, description: "One or more recipient node IDs")
