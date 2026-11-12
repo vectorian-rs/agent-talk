@@ -16,14 +16,14 @@ defmodule AgentTalk.OperatorLiveTest do
     assert html =~ "Agent messages"
     assert has_element?(view, "#empty-messages")
     assert has_element?(view, "#empty-agents")
-    assert has_element?(view, "#ring-select[disabled]")
+    assert has_element?(view, "#ring-empty")
     pm = register(%{role: "pm", project: "hiko", name: "hiko / pm"})
     first = join(pm, "hiko / w-1")
     second = join(pm, "hiko / w-2")
     assert has_element?(view, "#agent-count", "3")
     assert has_element?(view, "#agent-#{first.node_id} .agent-name", "hiko / w-1")
     assert has_element?(view, "#agent-#{first.node_id} .agent-role", "Worker · #{first.node_id}")
-    assert has_element?(view, "#ring-select option[value='#{pm.ring_id}']", "hiko")
+    assert has_element?(view, "#ring-select .ring-chip[phx-value-ring='#{pm.ring_id}']", "hiko")
 
     assert has_element?(
              view,
@@ -108,14 +108,20 @@ defmodule AgentTalk.OperatorLiveTest do
 
     send_message(other_pm, other_worker.node_id, "Tax task")
     {:ok, view, _} = live(build_conn(), "/")
-    assert has_element?(view, "#ring-select option[value='#{pm.ring_id}']", "hiko")
-    assert has_element?(view, "#ring-select option[value='#{other_pm.ring_id}']", "celeratax")
+    assert has_element?(view, "#ring-select .ring-chip[phx-value-ring='#{pm.ring_id}']", "hiko")
+
+    assert has_element?(
+             view,
+             "#ring-select .ring-chip[phx-value-ring='#{other_pm.ring_id}']",
+             "celeratax"
+           )
+
     assert has_element?(view, "#agent-#{other_pm.node_id}", "celeratax / pm")
     refute has_element?(view, "#agent-#{pm.node_id}")
     assert has_element?(view, "#agent-count", "2")
     assert has_element?(view, "#message-stream", "Tax task")
 
-    view |> form("#ring-selector", %{ring: pm.ring_id}) |> render_change()
+    view |> element("#ring-select .ring-chip[phx-value-ring='#{pm.ring_id}']") |> render_click()
     assert has_element?(view, "#agent-#{pm.node_id}", "hiko / pm")
     refute has_element?(view, "#agent-#{other_pm.node_id}")
     refute has_element?(view, "#message-stream", "Tax task")
@@ -128,7 +134,7 @@ defmodule AgentTalk.OperatorLiveTest do
            )
 
     send_message(other_pm, other_worker.node_id, "Unselected ring update")
-    assert has_element?(view, "#ring-select option[selected][value='#{pm.ring_id}']")
+    assert has_element?(view, "#ring-select .ring-chip.is-selected[phx-value-ring='#{pm.ring_id}']")
     refute has_element?(view, "#message-stream", "Unselected ring update")
     assert has_element?(view, "#message-count", "1")
 
@@ -137,7 +143,7 @@ defmodule AgentTalk.OperatorLiveTest do
     |> render_change()
 
     assert has_element?(view, "#no-matches")
-    view |> form("#ring-selector", %{ring: other_pm.ring_id}) |> render_change()
+    view |> element("#ring-select .ring-chip[phx-value-ring='#{other_pm.ring_id}']") |> render_click()
     assert has_element?(view, "#message-stream", "Tax task")
     assert has_element?(view, "#message-stream", "Unselected ring update")
     assert has_element?(view, "#message-count", "2")

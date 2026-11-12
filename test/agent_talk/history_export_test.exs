@@ -44,7 +44,7 @@ defmodule AgentTalk.HistoryExportTest do
     {:ok, _} = Hub.communicate(auth(worker, %{action: "receive"}))
     send_message(other, other_worker, "Other ring task")
     {:ok, view, _} = live(build_conn(), "/")
-    view |> form("#ring-selector", %{ring: pm.ring_id}) |> render_change()
+    view |> element("#ring-select .ring-chip[phx-value-ring='#{pm.ring_id}']") |> render_click()
 
     assert has_element?(
              view,

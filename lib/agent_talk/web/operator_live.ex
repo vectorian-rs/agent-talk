@@ -203,22 +203,20 @@ defmodule AgentTalk.Web.OperatorLive do
 
         <div class="console-grid">
           <aside class="agents-panel" aria-labelledby="agents-title">
-            <form id="ring-selector" phx-change="select_ring" class="ring-selector">
-              <label for="ring-select" class="small-label">Ring</label>
-              <select id="ring-select" name="ring" disabled={@rings == []}>
-                <option :if={@rings == []} value="">No rings</option>
-                <option :for={ring <- @rings} value={ring.id} selected={@ring == ring.id}>{ring.label}</option>
-              </select>
-            </form>
-            <form :if={@snapshot.history_persistent} id="history-export" class="history-export" action="/history/export" method="get">
-              <label for="history-date" class="small-label">Conversation archive · UTC</label>
-              <input id="history-date" name="date" type="date" value={@review_date} required />
-              <select name="ring" aria-label="Archive ring scope">
-                <option :if={@ring} value={@ring} selected>Selected ring</option>
-                <option value="" selected={is_nil(@ring)}>All rings</option>
-              </select>
-              <button type="submit">Download day (Markdown)</button>
-            </form>
+            <div id="ring-selector" class="ring-selector" role="group" aria-label="Ring">
+              <span class="small-label">Ring</span>
+              <p :if={@rings == []} id="ring-empty" class="ring-empty">No rings</p>
+              <div :if={@rings != []} id="ring-select" class="ring-chips">
+                <button
+                  :for={ring <- @rings}
+                  type="button"
+                  class={["ring-chip", @ring == ring.id && "is-selected"]}
+                  phx-click="select_ring"
+                  phx-value-ring={ring.id}
+                  aria-pressed={@ring == ring.id}
+                >{ring.label}</button>
+              </div>
+            </div>
             <div class="panel-heading">
               <h2 id="agents-title">Registered agents</h2><span class="count-label">{length(@nodes)}</span>
             </div>
@@ -278,6 +276,18 @@ defmodule AgentTalk.Web.OperatorLive do
                   <option :for={party <- Enum.uniq([@party | @parties]) |> Enum.reject(&(&1 == "all"))} value={party} selected={@party == party}>{Map.get(@labels, party, party)}</option>
                 </select>
               </label>
+            </form>
+
+            <form :if={@snapshot.history_persistent} id="history-export" class="history-export" action="/history/export" method="get">
+              <label for="history-date" class="small-label">Conversation archive · UTC</label>
+              <div class="history-export-row">
+                <input id="history-date" name="date" type="date" value={@review_date} required />
+                <select name="ring" aria-label="Archive ring scope">
+                  <option :if={@ring} value={@ring} selected>Selected ring</option>
+                  <option value="" selected={is_nil(@ring)}>All rings</option>
+                </select>
+                <button type="submit">Download day (Markdown)</button>
+              </div>
             </form>
 
             <div :if={@messages == []} id="empty-messages" class="empty-messages chart-panel">
