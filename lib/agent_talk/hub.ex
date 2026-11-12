@@ -319,8 +319,8 @@ defmodule AgentTalk.Hub do
   # and handle_call's persist + broadcast then apply. Idempotent — an unknown or
   # already-gone id reports evicted: false and changes nothing.
   defp dispatch({:evict, node_id}, state, _now) do
-    {{:ok, %{evicted: Map.has_key?(state.nodes, node_id)}},
-     %{state | nodes: Map.delete(state.nodes, node_id)}}
+    {existing, nodes} = Map.pop(state.nodes, node_id)
+    {{:ok, %{evicted: existing != nil}}, %{state | nodes: nodes}}
   end
 
   defp dispatch({:register, args}, state, now) do
