@@ -4,6 +4,7 @@ defmodule AgentTalk.Tools.RegisterNode do
   Other agents join with their role and that ring_token; the server assigns unique IDs.
   Renew with role, node_id and your private token. After expiry, join again with role
   and ring_token for a new identity. Save every successful response and follow its instructions.
+  An optional purpose line advertises what you do, so peers can find you by capability in list_nodes.
   """
   use Anubis.Server.Component, type: :tool, name: "register_node"
 
@@ -39,6 +40,12 @@ defmodule AgentTalk.Tools.RegisterNode do
       min_length: 1,
       max_length: 128,
       description: "Display name, e.g. hiko / w-1"
+    )
+
+    field(:purpose, :string,
+      min_length: 1,
+      max_length: 128,
+      description: "One line describing what you do, so peers can find you by capability"
     )
   end
 

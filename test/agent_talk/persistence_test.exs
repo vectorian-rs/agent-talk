@@ -29,7 +29,8 @@ defmodule AgentTalk.PersistenceTest do
         role: "worker",
         ring_token: pm.ring_token,
         project: "hiko",
-        name: "hiko / w-1"
+        name: "hiko / w-1",
+        purpose: "runs deployments"
       })
 
     assert {:ok, _} = send_message(hub, pm, worker, "Volatile task")
@@ -46,7 +47,9 @@ defmodule AgentTalk.PersistenceTest do
     assert renewed.node_id == worker.node_id
     assert renewed.name == "hiko / w-1"
     assert renewed.project == "hiko"
+    assert renewed.purpose == "runs deployments"
     assert {:ok, %{nodes: nodes, inbox: %{pending_messages: 0}}} = Hub.list_nodes(auth(pm), hub)
+    assert Enum.find(nodes, &(&1.node_id == worker.node_id)).purpose == "runs deployments"
     assert Enum.sort(Enum.map(nodes, & &1.node_id)) == Enum.sort([pm.node_id, worker.node_id])
     assert {:ok, %{messages: []}} = Hub.snapshot(hub)
 

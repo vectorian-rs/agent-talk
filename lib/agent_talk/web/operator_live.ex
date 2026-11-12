@@ -212,6 +212,7 @@ defmodule AgentTalk.Web.OperatorLive do
                 <div class="agent-details">
                   <p class="agent-name">{node.name}</p>
                   <p class="agent-role">{role_name(node.role)} · {node.node_id}</p>
+                  <p :if={node.purpose} class="agent-purpose" title="Advertised purpose">{node.purpose}</p>
                   <p class="agent-pending">{node.pending_messages} in inbox</p>
                   <p class="agent-activity">
                     Last activity <time datetime={node.last_seen} title={node.last_seen}>{clock(node.last_seen)} UTC</time>

@@ -39,7 +39,12 @@ defmodule AgentTalk.MCPTest do
 
     workers =
       for name <- [AgentTalk.TestW1, AgentTalk.TestW2] do
-        {name, call(name, "register_node", %{role: "worker", ring_token: pm["ring_token"]})}
+        {name,
+         call(name, "register_node", %{
+           role: "worker",
+           ring_token: pm["ring_token"],
+           purpose: "runs deployments"
+         })}
       end
 
     ids = Enum.map(workers, fn {_client, node} -> node["node_id"] end) |> Enum.sort()
@@ -47,6 +52,9 @@ defmodule AgentTalk.MCPTest do
     assert nodes["ring_id"] == pm["ring_id"]
     assert nodes["inbox"] == %{"pending_messages" => 0, "next_message_id" => nil}
     assert Enum.map(nodes["nodes"], & &1["node_id"]) == ids
+
+    assert Enum.all?(nodes["nodes"], &(&1["purpose"] == "runs deployments")),
+           "purpose must reach peers so they can route by capability"
 
     assert Enum.all?(
              nodes["nodes"],

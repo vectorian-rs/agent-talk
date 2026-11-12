@@ -8,7 +8,12 @@ defmodule AgentTalk.Hub do
   # AgentTalk.tool_reply); the message is advisory prose, free to change.
   # Codes: :invalid_request, :invalid_labels, :invalid_ring_token,
   # :invalid_token, :expired, :inbox_full, :storage.
-  @labels_error "project and name must be nonempty labels of at most 128 characters without control characters"
+  @labels_error "project, name and purpose must be nonempty labels of at most 128 characters without control characters"
+
+  # Free-text display and discovery labels a caller sets on its own node, set at
+  # register and updatable on list_nodes. purpose is the one line a searcher
+  # reads to route by capability ("whoever does the deployments").
+  @label_fields [:project, :name, :purpose]
   @missing_node_error "node is not registered or has expired; join again with role and ring_token"
   @invalid_token_error "invalid node token"
 
@@ -258,7 +263,7 @@ defmodule AgentTalk.Hub do
           updated =
             update_in(
               updated.nodes[caller.node_id],
-              &Map.merge(&1, Map.take(args, [:project, :name]))
+              &Map.merge(&1, Map.take(args, @label_fields))
             )
 
           nodes =
@@ -307,7 +312,7 @@ defmodule AgentTalk.Hub do
           true ->
             node =
               node
-              |> Map.merge(Map.take(args, [:project, :name]))
+              |> Map.merge(Map.take(args, @label_fields))
               |> Map.merge(%{seen_at: now, last_seen: timestamp(state)})
 
             updated = put_in(state.nodes[node.node_id], node)
@@ -343,6 +348,7 @@ defmodule AgentTalk.Hub do
       role: args.role,
       project: Map.get(args, :project),
       name: Map.get(args, :name),
+      purpose: Map.get(args, :purpose),
       ring_id: ring_id,
       token: new_token(),
       inbox: :queue.new(),
@@ -527,7 +533,7 @@ defmodule AgentTalk.Hub do
   defp valid_id?(id), do: is_binary(id) and Regex.match?(~r/\A[a-zA-Z0-9_.-]{1,64}\z/, id)
 
   defp valid_labels?(args) do
-    Enum.all?([:project, :name], fn key ->
+    Enum.all?(@label_fields, fn key ->
       case Map.get(args, key) do
         nil ->
           true
@@ -643,6 +649,7 @@ defmodule AgentTalk.Hub do
       ring_id: node.ring_id,
       name: node_name(node),
       project: Map.get(node, :project),
+      purpose: Map.get(node, :purpose),
       last_seen: node.last_seen,
       pending_messages: :queue.len(node.inbox)
     }
