@@ -31,9 +31,11 @@ defmodule AgentTalk.Web.OperatorLive do
   end
 
   def handle_event("evict", %{"node_id" => node_id}, socket) do
-    # The dashboard is the trusted local surface; eviction needs no token. The
-    # pubsub broadcast from the hub refreshes this and every other open view.
-    {:ok, _} = Hub.evict(node_id)
+    # The dashboard is the trusted local surface; eviction needs no token. On
+    # success the hub's pubsub broadcast refreshes this and every other open
+    # view; a storage failure leaves the node in place (and is not matched here,
+    # so it never crashes the dashboard).
+    _ = Hub.evict(node_id)
     {:noreply, socket}
   end
 
