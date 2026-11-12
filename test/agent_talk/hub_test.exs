@@ -70,6 +70,34 @@ defmodule AgentTalk.HubTest do
     assert Enum.find(latest, &(&1.node_id == worker.node_id)).name == "hiko / w-1"
   end
 
+  test "a purpose line advertises capability and is discoverable in list_nodes", %{hub: hub} do
+    pm = register(hub, %{role: "pm"})
+
+    deployer =
+      register(hub, %{role: "worker", ring_token: pm.ring_token, purpose: "runs deployments"})
+
+    assert deployer.purpose == "runs deployments"
+
+    assert {:ok, %{nodes: nodes}} = Hub.list_nodes(auth(pm), hub)
+    listed = Enum.find(nodes, &(&1.node_id == deployer.node_id))
+    assert listed.purpose == "runs deployments"
+    assert Enum.find(nodes, &(&1.node_id == pm.node_id)).purpose == nil
+
+    assert {:ok, _} =
+             Hub.list_nodes(auth(deployer, %{purpose: "runs deployments and releases"}), hub)
+
+    assert {:ok, %{nodes: updated}} = Hub.list_nodes(auth(pm), hub)
+
+    assert Enum.find(updated, &(&1.node_id == deployer.node_id)).purpose ==
+             "runs deployments and releases"
+
+    assert {:error, :invalid_labels, _} =
+             Hub.list_nodes(auth(deployer, %{purpose: "bad\npurpose"}), hub)
+
+    assert {:error, :invalid_labels, _} =
+             Hub.register(%{role: "worker", ring_token: pm.ring_token, purpose: "\t"}, hub)
+  end
+
   test "invalid labels are rejected and message history retains names after expiry", %{
     hub: hub,
     clock: clock

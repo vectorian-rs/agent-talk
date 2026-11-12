@@ -1,7 +1,7 @@
 defmodule AgentTalk.MembershipStore do
   @moduledoc "Private, atomically replaced membership snapshots; messages remain in memory."
 
-  @node_fields [:node_id, :role, :ring_id, :token, :project, :name, :last_seen]
+  @node_fields [:node_id, :role, :ring_id, :token, :project, :name, :purpose, :last_seen]
 
   def node_fields, do: @node_fields
 
@@ -74,7 +74,7 @@ defmodule AgentTalk.MembershipStore do
   defp valid_node?(node, rings, counter) when is_map(node) do
     valid_id?(node["node_id"], "node", counter) and
       Map.has_key?(rings, node["ring_id"]) and text?(node["token"]) and text?(node["role"]) and
-      Enum.all?(["project", "name"], &(is_nil(node[&1]) or text?(node[&1]))) and
+      Enum.all?(["project", "name", "purpose"], &(is_nil(node[&1]) or text?(node[&1]))) and
       text?(node["last_seen"]) and match?({:ok, _, _}, DateTime.from_iso8601(node["last_seen"]))
   end
 

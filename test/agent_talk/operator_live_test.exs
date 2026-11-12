@@ -144,6 +144,23 @@ defmodule AgentTalk.OperatorLiveTest do
     refute has_element?(view, "#agent-#{pm.node_id}")
   end
 
+  test "the operator sees an advertised purpose only for nodes that set one" do
+    pm = register(%{role: "pm", project: "hiko", name: "hiko / pm"})
+
+    deployer =
+      register(%{
+        role: "worker",
+        ring_token: pm.ring_token,
+        project: "hiko",
+        name: "hiko / deploy",
+        purpose: "runs deployments"
+      })
+
+    {:ok, view, _} = live(build_conn(), "/")
+    assert has_element?(view, "#agent-#{deployer.node_id} .agent-purpose", "runs deployments")
+    refute has_element?(view, "#agent-#{pm.node_id} .agent-purpose")
+  end
+
   defp reset_hub do
     :ok = Supervisor.terminate_child(AgentTalk.Supervisor, Hub)
     {:ok, _} = Supervisor.restart_child(AgentTalk.Supervisor, Hub)

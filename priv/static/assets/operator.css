@@ -53,6 +53,7 @@
   .agent-details { flex: 1; min-width: 0; }
   .agent-name { font-size: .88rem; line-height: 1.35; font-weight: 500; overflow-wrap: anywhere; }
   .agent-role { font-size: .75rem; color: var(--muted); margin-top: .15rem; }
+  .agent-purpose { font-size: .72rem; color: var(--muted); margin-top: .3rem; font-style: italic; overflow-wrap: anywhere; }
   .agent-pending { font: .65rem var(--mono); color: var(--muted); margin-top: .5rem; }
   .agent-activity { font: .6rem var(--mono); color: var(--muted); margin-top: .35rem; line-height: 1.6; }
   .agent-activity time { white-space: nowrap; }
