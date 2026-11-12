@@ -20,6 +20,17 @@ const liveSocket = new LiveSocket("/live", Socket, {
 });
 liveSocket.connect();
 
+// This LiveView build does not handle data-confirm itself, so guard it here:
+// run in the capture phase and stop the event when the operator cancels, before
+// LiveView dispatches the phx-click.
+document.addEventListener("click", (event) => {
+  const el = event.target.closest("[data-confirm]");
+  if (el && !window.confirm(el.getAttribute("data-confirm"))) {
+    event.preventDefault();
+    event.stopImmediatePropagation();
+  }
+}, true);
+
 document.addEventListener("click", (event) => {
   if (!event.target.closest("#theme-toggle")) return;
   const root = document.documentElement;

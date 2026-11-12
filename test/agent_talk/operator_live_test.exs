@@ -161,6 +161,20 @@ defmodule AgentTalk.OperatorLiveTest do
     refute has_element?(view, "#agent-#{pm.node_id} .agent-purpose")
   end
 
+  test "the operator evicts an agent, removing it from the live view" do
+    pm = register(%{role: "pm", project: "hiko", name: "hiko / pm"})
+    worker = join(pm, "hiko / w-1")
+    {:ok, view, _} = live(build_conn(), "/")
+    assert has_element?(view, "#agent-#{worker.node_id}")
+
+    view |> element("#agent-#{worker.node_id} .agent-evict") |> render_click()
+
+    refute has_element?(view, "#agent-#{worker.node_id}")
+    assert has_element?(view, "#agent-#{pm.node_id}"), "eviction is scoped to its target"
+    {:ok, %{nodes: nodes}} = Hub.snapshot()
+    refute Enum.any?(nodes, &(&1.node_id == worker.node_id))
+  end
+
   defp reset_hub do
     :ok = Supervisor.terminate_child(AgentTalk.Supervisor, Hub)
     {:ok, _} = Supervisor.restart_child(AgentTalk.Supervisor, Hub)

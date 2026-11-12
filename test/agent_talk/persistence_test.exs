@@ -203,6 +203,29 @@ defmodule AgentTalk.PersistenceTest do
       assert {:ok, %{messages: []}} = receive_messages(hub, rejoined)
     end
 
+    test "an evicted node stays gone after a restart and its queued mail is not restored", %{
+      hub: hub,
+      opts: opts
+    } do
+      pm = register(hub, %{role: "pm"})
+      worker = register(hub, %{role: "worker", ring_token: pm.ring_token})
+      survivor = register(hub, %{role: "worker", ring_token: pm.ring_token})
+      assert {:ok, _} = send_message(hub, pm, worker, "For the evicted")
+      assert {:ok, _} = send_message(hub, pm, survivor, "For the survivor")
+
+      assert {:ok, %{evicted: true}} = Hub.evict(worker.node_id, hub)
+      hub = restart(opts)
+
+      assert {:error, :expired, @missing} = Hub.list_nodes(auth(worker), hub)
+      {:ok, %{nodes: nodes}} = Hub.list_nodes(auth(pm), hub)
+      refute Enum.any?(nodes, &(&1.node_id == worker.node_id))
+
+      # The archive still holds the evicted node's row, but recovery keys off the
+      # surviving membership, so its mail stays discarded; the survivor recovers.
+      assert {:ok, %{messages: [%{message: "For the survivor"}]}} =
+               receive_messages(hub, survivor)
+    end
+
     test "recovery is not bounded by the live history window", %{opts: opts} do
       opts = Keyword.put(opts, :history_limit, 3)
       hub = restart(opts)

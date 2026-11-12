@@ -15,6 +15,9 @@
   .connection-status.is-connected .connection-dot { background: var(--online); box-shadow: 0 0 0 4px var(--online-bg); }
   .connection-status.is-disconnected { color: var(--muted); }
   .agent-online { background: var(--online); margin-top: .45rem; }
+  .agent-evict { flex: none; align-self: flex-start; margin-left: .25rem; padding: .15rem .5rem; font-size: .6rem; color: var(--muted); background: transparent; border: 1px solid var(--line); border-radius: 4px; cursor: pointer; }
+  .agent-evict:hover { color: var(--drawing); border-color: var(--drawing); }
+  .operator-error { margin: .75rem auto; max-width: var(--wrap, 72rem); padding: .6rem .9rem; font-size: .8rem; color: var(--assumption-ink, #b42318); background: var(--assumption-bg, #fef3f2); border: 1px solid var(--assumption-line, #f5c2c0); border-radius: 6px; cursor: pointer; }
   .theme-button { display: grid; place-items: center; padding: .55rem; width: 2.35rem; height: 2.35rem; border-radius: 50%; border: 1px solid var(--stroke); background: var(--surface); color: var(--muted); }
   .theme-button:hover { color: var(--ink); border-color: var(--ink); }
   .theme-button svg { width: 100%; height: 100%; }
