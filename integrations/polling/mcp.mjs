@@ -26,6 +26,16 @@ export async function readMembership(file) {
   return member;
 }
 
+// The HTTP timeout for a tool call: never below a waited list_nodes grant
+// (held server-side up to wait_seconds, capped at 25s), whatever the caller
+// passed, so a waited call can't abort early and re-park in a loop. Falls back
+// to request()'s own default when nothing constrains it.
+export function httpTimeout(args, timeoutMs) {
+  const held = Number.isInteger(args?.wait_seconds) && args.wait_seconds > 0 ?
+    Math.min(args.wait_seconds * 1000, 25_000) + 5_000 : 0;
+  return Math.max(timeoutMs ?? 0, held) || undefined;
+}
+
 export function validateServerUrl(url) {
   let parsed;
   try { parsed = new URL(url); } catch {
@@ -47,11 +57,12 @@ export class McpClient {
   }
 
   async call(name, args, signal, timeoutMs) {
+    const timeout = httpTimeout(args, timeoutMs);
     for (let attempt = 0; attempt < 2; attempt++) {
       try {
         await this.connect(signal);
         const result = await this.request("tools/call", { name, arguments: args }, signal,
-          false, timeoutMs);
+          false, timeout);
         if (result.isError) {
           // Branch on the server's machine-readable code; prose matching only
           // remains as a fallback for servers that predate error codes.

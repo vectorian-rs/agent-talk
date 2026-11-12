@@ -39,13 +39,14 @@ defmodule AgentTalk.Hub do
   # grant, this only keeps the caller's timeout above any possible grant.
   defp call_timeout(args) do
     case Map.get(args, :wait_seconds) do
-      seconds when is_integer(seconds) and seconds > 0 ->
-        min(seconds * 1000, @wait_cap_ms) + 5_000
-
-      _ ->
-        5_000
+      seconds when is_integer(seconds) and seconds >= 0 -> wait_cap_ms(seconds) + 5_000
+      _ -> 5_000
     end
   end
+
+  # The hold a request may be granted, before the per-call ttl/2 term; shared so
+  # the client timeout and the server grant can never disagree on the cap.
+  defp wait_cap_ms(seconds), do: min(seconds * 1000, @wait_cap_ms)
 
   def communicate(args, server \\ __MODULE__), do: GenServer.call(server, {:communicate, args})
   def snapshot(server \\ __MODULE__), do: GenServer.call(server, :snapshot)
@@ -258,7 +259,12 @@ defmodule AgentTalk.Hub do
           end
         )
 
-        %{updated | presence_dirty: true}
+        # Only a successful wake renewed the lease; a gone node returns an error
+        # with unchanged state, so it must not trigger a spurious presence flush.
+        case reply do
+          {:ok, _} -> %{updated | presence_dirty: true}
+          _ -> updated
+        end
     end
   end
 
@@ -408,7 +414,7 @@ defmodule AgentTalk.Hub do
         {:ok, nil}
 
       seconds when is_integer(seconds) and seconds >= 0 ->
-        {:ok, Enum.min([seconds * 1000, @wait_cap_ms, div(state.ttl_ms, 2)])}
+        {:ok, min(wait_cap_ms(seconds), div(state.ttl_ms, 2))}
 
       _ ->
         {:error, :invalid_request, "wait_seconds must be a non-negative integer"}

@@ -3,7 +3,20 @@ import { mkdtemp, writeFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { McpClient, readMembership } from "./mcp.mjs";
+import { McpClient, httpTimeout, readMembership } from "./mcp.mjs";
+
+test("httpTimeout never drops below a waited grant, whatever the caller passes", () => {
+  assert.equal(httpTimeout({}, undefined), undefined, "non-waited calls keep the request default");
+  assert.equal(httpTimeout({ wait_seconds: 0 }, undefined), undefined);
+  // A waited call with no explicit timeout gets a floor above the server grant.
+  assert.equal(httpTimeout({ wait_seconds: 25 }, undefined), 30_000);
+  assert.equal(httpTimeout({ wait_seconds: 10 }, undefined), 15_000);
+  // The server caps the grant at 25s, so the floor caps too.
+  assert.equal(httpTimeout({ wait_seconds: 1000 }, undefined), 30_000);
+  // An explicit larger timeout still wins; a smaller one is raised to the floor.
+  assert.equal(httpTimeout({ wait_seconds: 10 }, 60_000), 60_000);
+  assert.equal(httpTimeout({ wait_seconds: 25 }, 5_000), 30_000);
+});
 
 function transport(handler) {
   const calls = [];
