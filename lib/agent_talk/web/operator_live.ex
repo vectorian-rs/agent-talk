@@ -32,12 +32,15 @@ defmodule AgentTalk.Web.OperatorLive do
 
   def handle_event("evict", %{"node_id" => node_id}, socket) do
     # The dashboard is the trusted local surface; eviction needs no token. On
-    # success the hub's pubsub broadcast refreshes this and every other open
-    # view; a storage failure leaves the node in place (and is not matched here,
-    # so it never crashes the dashboard).
-    _ = Hub.evict(node_id)
-    {:noreply, socket}
+    # success the hub's pubsub broadcast refreshes this and every open view; a
+    # storage failure leaves the node in place and is surfaced, never crashing.
+    case Hub.evict(node_id) do
+      {:ok, _} -> {:noreply, socket}
+      {:error, _code, message} -> {:noreply, put_flash(socket, :error, message)}
+    end
   end
+
+  def handle_event("clear_error", _params, socket), do: {:noreply, clear_flash(socket)}
 
   defp refresh(socket) do
     {:ok, snapshot} = Hub.snapshot()
@@ -174,6 +177,17 @@ defmodule AgentTalk.Web.OperatorLive do
         </div>
       </header>
 
+      <p
+        :if={Phoenix.Flash.get(@flash, :error)}
+        id="operator-error"
+        class="operator-error"
+        role="alert"
+        phx-click="clear_error"
+        title="Dismiss"
+      >
+        {Phoenix.Flash.get(@flash, :error)}
+      </p>
+
       <main id="main" class="wrap operator-main">
         <section class="console-heading" aria-labelledby="console-title">
           <div>
@@ -233,7 +247,7 @@ defmodule AgentTalk.Web.OperatorLive do
                   class="agent-evict"
                   phx-click="evict"
                   phx-value-node_id={node.node_id}
-                  data-confirm={"Evict #{node.name}? Its queued mail is discarded and it must re-register."}
+                  data-confirm={"Evict #{node.name}? This expires its registration and discards #{node.pending_messages} queued message(s). An active agent can rejoin automatically."}
                   title="Force-expire this node"
                 >
                   Evict
