@@ -1,8 +1,8 @@
 # Plan: long-poll inbox watching (`wait_seconds`)
 
-Status: implemented. Builds on inbox recovery (#6) and reply references (#5).
-Adds timer and concurrency handling without changing which messages agents can
-receive; plain `list_nodes` replies stay byte-identical to before.
+Status: implemented on top of inbox recovery (#6); independent of reply
+references (#5). Adds timer and concurrency handling without changing which
+messages agents can receive; plain `list_nodes` replies stay byte-identical.
 
 ## Problem
 
