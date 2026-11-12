@@ -89,6 +89,8 @@ test("status explains a saved-registration error instead of showing only its fil
   try {
     await writeFile(file, "{}", { mode: 0o600 });
     await r.hooks.session_start({ reason: "startup" }, r.ctx);
+    // Session start no longer waits for the first check; let it finish.
+    for (let n = 0; n < 20; n++) await new Promise(setImmediate);
     await r.commands["agent-talk"]("status", r.ctx);
     assert.match(notices.at(-1), /successful register_node result/);
     assert.ok(notices.at(-1).includes(file));
@@ -145,11 +147,14 @@ test("a human prompt resumes automatic turns after cancellation while checks con
       node_id: "node-test", token: "test-only-private", ring_id: "ring-test", role: "worker",
     }));
     await r.hooks.session_start({ reason: "startup" }, r.ctx);
+    // Session start and settling no longer wait for checks; let them finish.
+    for (let n = 0; n < 20 && r.messages.length === 0; n++) await new Promise(setImmediate);
     assert.equal(r.messages.length, 1);
     assert.match(r.messages[0].message.content, /session's existing instructions/);
     assert.doesNotMatch(r.messages[0].message.content, /claims|acceptance|assigns the next|AGENTS\.md|\.claude/);
     const before = checks;
     await r.hooks.agent_settled({ aborted: true });
+    for (let n = 0; n < 20 && checks === before; n++) await new Promise(setImmediate);
     assert.ok(checks > before, "cancelled model turns must not stop presence checks");
     assert.equal(r.messages.length, 1, "cancellation must not immediately restart work");
     await r.commands["agent-talk"]("status", r.ctx);

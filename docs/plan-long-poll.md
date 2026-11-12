@@ -1,9 +1,8 @@
 # Plan: long-poll inbox watching (`wait_seconds`)
 
-Status: deferred. Implement inbox recovery (#6), then reply references (#5).
-Keep the current 10-second watcher until lower notification latency is a
-requirement; this plan adds timer and concurrency handling without changing
-which messages agents can receive.
+Status: implemented. Builds on inbox recovery (#6) and reply references (#5).
+Adds timer and concurrency handling without changing which messages agents can
+receive; plain `list_nodes` replies stay byte-identical to before.
 
 ## Problem
 

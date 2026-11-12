@@ -22,12 +22,31 @@ defmodule AgentTalk.Hub do
   # definition; UI/archive-only metadata stays out of inbox payloads.
   @message_fields [:id, :from, :ring_id, :message, :sent_at, :reply_to]
 
+  # Longest wait a list_nodes call may be parked, under common 30-second
+  # HTTP/proxy request timeouts (Anubis's plug allows 30s per request).
+  @wait_cap_ms 25_000
+
   def start_link(opts) do
     GenServer.start_link(__MODULE__, opts, name: Keyword.get(opts, :name, __MODULE__))
   end
 
   def register(args, server \\ __MODULE__), do: GenServer.call(server, {:register, args})
-  def list_nodes(args, server \\ __MODULE__), do: GenServer.call(server, {:list, args})
+
+  def list_nodes(args, server \\ __MODULE__),
+    do: GenServer.call(server, {:list, args}, call_timeout(args))
+
+  # A waited call must outlive its park; the server clamp decides the real
+  # grant, this only keeps the caller's timeout above any possible grant.
+  defp call_timeout(args) do
+    case Map.get(args, :wait_seconds) do
+      seconds when is_integer(seconds) and seconds > 0 ->
+        min(seconds * 1000, @wait_cap_ms) + 5_000
+
+      _ ->
+        5_000
+    end
+  end
+
   def communicate(args, server \\ __MODULE__), do: GenServer.call(server, {:communicate, args})
   def snapshot(server \\ __MODULE__), do: GenServer.call(server, :snapshot)
 
@@ -43,6 +62,7 @@ defmodule AgentTalk.Hub do
         rings: %{},
         next_id: 0,
         messages: [],
+        waiters: %{},
         membership_file: Keyword.get(opts, :membership_file),
         history_file: Keyword.get(opts, :history_file),
         pubsub: Keyword.get(opts, :pubsub),
@@ -138,7 +158,7 @@ defmodule AgentTalk.Hub do
   end
 
   @impl true
-  def handle_call(request, _from, state) do
+  def handle_call(request, from, state) do
     now = state.clock.()
     {reply, updated} = dispatch(request, expire_nodes(state, now), now)
 
@@ -153,7 +173,7 @@ defmodule AgentTalk.Hub do
              ) do
           :ok ->
             notify_if_changed(state, persisted)
-            {:reply, reply, persisted}
+            respond(reply, from, wake_ready_waiters(persisted))
 
           {:error, _} ->
             retained = restore_mailboxes(state, persisted)
@@ -183,11 +203,76 @@ defmodule AgentTalk.Hub do
     case persist(state, updated, now) do
       {:ok, persisted} ->
         notify_if_changed(state, persisted)
-        {:noreply, persisted}
+        {:noreply, wake_ready_waiters(persisted)}
 
       {:error, _} ->
         {:noreply, state}
     end
+  end
+
+  # Cancelling a timer cannot unsend an already-queued timeout, so a timeout
+  # acts only when it carries the current park's exact timer reference.
+  @impl true
+  def handle_info({:timeout, timer, {:waiter_timeout, node_id}}, state) do
+    case Map.get(state.waiters, node_id) do
+      {_from, ^timer, _args} -> {:noreply, wake_waiter(state, node_id)}
+      _ -> {:noreply, state}
+    end
+  end
+
+  defp respond({:park, node_id, wait_ms, args}, from, state),
+    do: {:noreply, park_waiter(state, node_id, from, wait_ms, args)}
+
+  defp respond(reply, _from, state), do: {:reply, reply, state}
+
+  # At most one park per node: a replacement releases the previous caller
+  # with a normal woken reply before storing the new one.
+  defp park_waiter(state, node_id, from, wait_ms, args) do
+    state = wake_waiter(state, node_id)
+    timer = :erlang.start_timer(wait_ms, self(), {:waiter_timeout, node_id})
+    put_in(state.waiters[node_id], {from, timer, args})
+  end
+
+  # Waking is re-dispatch, not a second reply path: the stored args minus the
+  # wait run back through the normal list pipeline (a node gone since parking
+  # yields the usual expired error), and only waited_seconds — the original
+  # grant, recomputed — is layered on top. The re-dispatch renews the lease,
+  # a presence-only change, so it is deferred to the regular presence flush.
+  defp wake_waiter(state, node_id) do
+    case Map.pop(state.waiters, node_id) do
+      {nil, _waiters} ->
+        state
+
+      {{from, timer, args}, waiters} ->
+        :erlang.cancel_timer(timer)
+        state = %{state | waiters: waiters}
+        {:ok, wait_ms} = effective_wait(args, state)
+
+        {reply, updated} =
+          dispatch({:list, Map.delete(args, :wait_seconds)}, state, state.clock.())
+
+        GenServer.reply(
+          from,
+          with {:ok, payload} <- reply do
+            {:ok, Map.put(payload, :waited_seconds, wait_ms / 1000)}
+          end
+        )
+
+        %{updated | presence_dirty: true}
+    end
+  end
+
+  # Runs after every serialized state change. The wake predicate is hardwired
+  # to "own inbox non-empty or node gone"; a future caller watching anything
+  # else gets an explicit wait_for argument here, not a second parking
+  # mechanism.
+  defp wake_ready_waiters(state) do
+    Enum.reduce(Map.keys(state.waiters), state, fn node_id, state ->
+      case state.nodes[node_id] do
+        %{inbox: inbox} -> if :queue.is_empty(inbox), do: state, else: wake_waiter(state, node_id)
+        nil -> wake_waiter(state, node_id)
+      end
+    end)
   end
 
   # Expiry is also enforced on every call; the timer only covers idle servers.
@@ -260,25 +345,46 @@ defmodule AgentTalk.Hub do
           {{:error, :invalid_request, "invalid role filter"}, updated}
 
         true ->
-          updated =
-            update_in(
-              updated.nodes[caller.node_id],
-              &Map.merge(&1, Map.take(args, @label_fields))
-            )
+          case effective_wait(args, state) do
+            {:error, _, _} = error ->
+              {error, updated}
 
-          nodes =
-            ring_nodes(updated, caller.ring_id)
-            |> public_nodes()
-            |> Enum.filter(&(role == nil or &1.role == role))
+            {:ok, wait_ms} ->
+              updated =
+                update_in(
+                  updated.nodes[caller.node_id],
+                  &Map.merge(&1, Map.take(args, @label_fields))
+                )
 
-          next_message_id =
-            case :queue.peek(caller.inbox) do
-              {:value, message} -> message.id
-              :empty -> nil
-            end
+              nodes =
+                ring_nodes(updated, caller.ring_id)
+                |> public_nodes()
+                |> Enum.filter(&(role == nil or &1.role == role))
 
-          inbox = %{pending_messages: :queue.len(caller.inbox), next_message_id: next_message_id}
-          {{:ok, %{ring_id: caller.ring_id, nodes: nodes, inbox: inbox}}, updated}
+              next_message_id =
+                case :queue.peek(caller.inbox) do
+                  {:value, message} -> message.id
+                  :empty -> nil
+                end
+
+              inbox = %{
+                pending_messages: :queue.len(caller.inbox),
+                next_message_id: next_message_id
+              }
+
+              payload = %{ring_id: caller.ring_id, nodes: nodes, inbox: inbox}
+
+              cond do
+                wait_ms == nil ->
+                  {{:ok, payload}, updated}
+
+                inbox.pending_messages == 0 and wait_ms > 0 ->
+                  {{:park, caller.node_id, wait_ms, args}, updated}
+
+                true ->
+                  {{:ok, Map.put(payload, :waited_seconds, 0)}, updated}
+              end
+          end
       end
     else
       {:error, _, _} = error -> {error, state}
@@ -289,6 +395,23 @@ defmodule AgentTalk.Hub do
     case authenticate(args, state, now) do
       {:ok, node, updated} -> communicate(args, updated, node)
       {:error, _, _} = error -> {error, state}
+    end
+  end
+
+  # Only waited requests gain waited_seconds; plain replies stay byte-identical
+  # to a server without this feature. The clamp is the single authority on the
+  # grant: under common 30s proxy timeouts and at most half the lease, so a
+  # parked healthy node never expires mid-wait.
+  defp effective_wait(args, state) do
+    case Map.get(args, :wait_seconds) do
+      nil ->
+        {:ok, nil}
+
+      seconds when is_integer(seconds) and seconds >= 0 ->
+        {:ok, Enum.min([seconds * 1000, @wait_cap_ms, div(state.ttl_ms, 2)])}
+
+      _ ->
+        {:error, :invalid_request, "wait_seconds must be a non-negative integer"}
     end
   end
 

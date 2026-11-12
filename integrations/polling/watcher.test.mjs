@@ -9,11 +9,12 @@ function fixture() {
   const state = { member, inbox: { pending_messages: 0, next_message_id: null } };
   const watcher = new InboxWatcher({
     loadMembership: async () => state.member,
-    client: { call: async (name, args, signal) => {
-      calls.push({ name, args, signal });
+    client: { call: async (name, args, signal, timeoutMs) => {
+      calls.push({ name, args, signal, timeoutMs });
       if (state.error) throw state.error;
       if (state.wait) await state.wait;
-      return { ring_id: state.member.ring_id, inbox: { ...state.inbox } };
+      return { ring_id: state.member.ring_id, inbox: { ...state.inbox },
+        ...(state.waited === undefined ? {} : { waited_seconds: state.waited }) };
     } },
     wake: (event) => { events.push(event); },
     status: (status) => { statuses.push(status); },
@@ -93,6 +94,67 @@ test("unread mail has bounded model retries; a new head message resets the budge
   f.state.inbox.next_message_id = "m-2";
   await f.watcher.check();
   assert.equal(f.events.length, 4);
+  f.watcher.stop();
+});
+
+test("checks ask the server to hold the reply and extend the HTTP timeout to match", async () => {
+  const f = fixture();
+  await f.watcher.start();
+  assert.equal(f.calls[0].args.wait_seconds, 25);
+  assert.equal(f.calls[0].timeoutMs, 30_000);
+  f.watcher.stop();
+});
+
+test("an empty held reply resumes the watch immediately; anything else keeps pacing", async () => {
+  const f = fixture();
+  f.state.waited = 25;
+  await f.watcher.start();
+  assert.equal(f.timers.at(-1).delay, 0);
+  await f.watcher.check();
+  assert.equal(f.timers.at(-1).delay, 0);
+  f.watcher.stop();
+
+  for (const shape of [
+    { inbox: { pending_messages: 1, next_message_id: "m-1" }, waited: 25 },
+    { inbox: { pending_messages: 0, next_message_id: null }, waited: 0 },
+    { inbox: { pending_messages: 0, next_message_id: null }, waited: undefined },
+  ]) {
+    const g = fixture();
+    g.state.inbox = shape.inbox;
+    g.state.waited = shape.waited;
+    await g.watcher.start();
+    assert.equal(g.timers.at(-1).delay, 10_000);
+    g.watcher.stop();
+  }
+});
+
+test("paused and stalled watchers keep interval pacing despite held replies", async () => {
+  const f = fixture();
+  f.state.waited = 25;
+  await f.watcher.start();
+  await f.watcher.settled(true);
+  assert.equal(f.statuses.at(-1).state, "paused");
+  assert.equal(f.timers.at(-1).delay, 10_000);
+  f.watcher.stop();
+
+  const g = fixture();
+  g.state.inbox = { pending_messages: 1, next_message_id: "m-1" };
+  g.state.waited = 0;
+  await g.watcher.start();
+  for (let n = 0; n < 5; n++) await g.watcher.settled();
+  assert.equal(g.statuses.at(-1).state, "stalled");
+  assert.equal(g.timers.at(-1).delay, 10_000);
+  g.watcher.stop();
+});
+
+test("errors keep their backoff even after held replies were seen", async () => {
+  const f = fixture();
+  f.state.waited = 25;
+  await f.watcher.start();
+  assert.equal(f.timers.at(-1).delay, 0);
+  f.state.error = new ClientError("transport", "Unavailable");
+  await f.watcher.check();
+  assert.equal(f.timers.at(-1).delay, 20_000);
   f.watcher.stop();
 });
 

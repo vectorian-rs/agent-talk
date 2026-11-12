@@ -197,9 +197,11 @@ try {
   await rpc(1, { type: "abort" });
   await until(() => diagnostics[1].aborted > 0 && !diagnostics[1].running, "Worker cancellation did not settle");
   diagnostics[1].cancelling = false;
+  // Lease renewals now ride the watch cadence: one at each park's start and
+  // wake, so consecutive renewals can be a full 25-second hold apart.
   await until(async () => (await client.call("list_nodes", auth(pm))).nodes
     .find((node) => node.node_id === workers[0].node_id).last_seen > before,
-  "Cancelled worker stopped heartbeats");
+  "Cancelled worker stopped heartbeats", 45_000);
   await until(() => diagnostics[1].status.includes("automatic turns paused"), "Cancellation status did not update");
   console.log("PASS: cancelling a real Pi turn pauses wake-ups while authenticated heartbeats continue.");
   for (const round of [1, 2]) {

@@ -46,11 +46,12 @@ export class McpClient {
     this.ready = false;
   }
 
-  async call(name, args, signal) {
+  async call(name, args, signal, timeoutMs) {
     for (let attempt = 0; attempt < 2; attempt++) {
       try {
         await this.connect(signal);
-        const result = await this.request("tools/call", { name, arguments: args }, signal);
+        const result = await this.request("tools/call", { name, arguments: args }, signal,
+          false, timeoutMs);
         if (result.isError) {
           // Branch on the server's machine-readable code; prose matching only
           // remains as a fallback for servers that predate error codes.
@@ -96,7 +97,9 @@ export class McpClient {
     return result.tools;
   }
 
-  async request(method, params, signal, notification = false) {
+  // timeoutMs only needs to exceed a server-side hold (a waited list_nodes);
+  // the default matches every immediate call.
+  async request(method, params, signal, notification = false, timeoutMs = 15_000) {
     const id = notification ? undefined : ++this.id;
     const headers = {
       "content-type": "application/json", accept: "application/json, text/event-stream",
@@ -108,8 +111,8 @@ export class McpClient {
       response = await this.fetch(this.url, {
         method: "POST", headers,
         body: JSON.stringify({ jsonrpc: "2.0", id, method, params }),
-        signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(15_000)]) :
-          AbortSignal.timeout(15_000),
+        signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(timeoutMs)]) :
+          AbortSignal.timeout(timeoutMs),
         redirect: "error",
       });
       if (!response.ok) {
