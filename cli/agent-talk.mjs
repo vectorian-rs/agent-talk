@@ -2,11 +2,11 @@
 import { parseArgs } from "node:util";
 import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
-import { initProject, loadProject, connect, provision, labels } from "./project.mjs";
+import { initProject, loadProject, connect, provision, inbox, inboxServer, labels } from "./project.mjs";
 import { piArguments } from "./pi.mjs";
-import { ClientError } from "../integrations/polling/mcp.mjs";
+import { ClientError, McpClient } from "../integrations/polling/mcp.mjs";
 
-const help = "Draft: agent-talk init [--client pi] [--workers 4]\n       agent-talk start pm|w-1|w-2|w-3|w-4\nRun from your project root. Only the requested session is launched. Project instructions are owned by your client setup.";
+const help = "Draft: agent-talk init [--client pi] [--workers 4]\n       agent-talk start pm|w-1|w-2|w-3|w-4\n       agent-talk inbox <membership.json> [--server URL]\nRun from your project root. Only the requested session is launched. Project instructions are owned by your client setup.";
 const quote = (value) => "'" + value.replaceAll("'", "'\\''") + "'";
 try {
   const { values, positionals } = parseArgs({ allowPositionals: true, strict: true, options: {
@@ -30,6 +30,12 @@ try {
     process.once("SIGTERM", forward);
     process.exitCode = await new Promise((resolve, reject) => { child.once("error", reject); child.once("exit", (code) => resolve(code ?? 1)); });
     process.removeListener("SIGTERM", forward);
+  } else if (command === "inbox" && positionals.length === 2) {
+    const client = new McpClient(await inboxServer(root, values));
+    const { node_id, pending, next } = await inbox(label, client);
+    console.log(pending > 0 ?
+      `AgentTalk: ${pending} pending message(s) for ${node_id} (next ${next}). Call communicate(action="receive") to read them.` :
+      `AgentTalk: inbox empty for ${node_id}.`);
   } else throw new Error("usage");
 } catch (e) {
   // ClientError messages are credential-free by design (see mcp.mjs); print them as-is.

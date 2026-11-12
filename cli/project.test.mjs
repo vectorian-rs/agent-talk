@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
-import { initProject, loadProject, memberFile, provision, stateDir, validate } from "./project.mjs";
+import { inbox, inboxServer, initProject, loadProject, memberFile, provision, stateDir, validate } from "./project.mjs";
 import { piArguments } from "./pi.mjs";
 
 async function project(t) {
@@ -109,6 +109,45 @@ test("Pi launch arguments configure only transport and inject no project setup o
   assert.deepEqual(args.slice(2), ["--agent-talk-membership", file, "--agent-talk-url", server]);
   assert.ok(!args.includes("--"), "a positional startup prompt must not be appended");
   assert.doesNotMatch(args.join(" "), /AGENTS\.md|\.claude|SKILL\.md|system-prompt/);
+});
+
+test("inbox reports pending mail for a saved registration without receiving", async (t) => {
+  const root = await project(t);
+  const file = join(root, "pm.json");
+  await writeFile(file, JSON.stringify({
+    node_id: "node-1", token: "test-private", ring_id: "ring-test", role: "pm",
+  }));
+  const calls = [];
+  const client = { call: async (name, args) => {
+    calls.push({ name, args });
+    return { ring_id: "ring-test", inbox: { pending_messages: 2, next_message_id: "message-5" } };
+  } };
+  assert.deepEqual(await inbox(file, client), { node_id: "node-1", pending: 2, next: "message-5" });
+  assert.deepEqual(calls, [{ name: "list_nodes", args: { node_id: "node-1", token: "test-private" } }],
+    "the check must read metadata only, never receive");
+});
+
+test("inbox rejects a missing registration and a foreign-ring or malformed reply", async (t) => {
+  const root = await project(t);
+  const file = join(root, "pm.json");
+  await assert.rejects(inbox(file, { call: async () => ({}) }), /No saved AgentTalk registration/);
+  await writeFile(file, JSON.stringify({
+    node_id: "node-1", token: "test-private", ring_id: "ring-test", role: "pm",
+  }));
+  for (const bad of [
+    { ring_id: "other", inbox: { pending_messages: 0, next_message_id: null } },
+    { ring_id: "ring-test", inbox: { pending_messages: "x", next_message_id: null } },
+  ]) {
+    await assert.rejects(inbox(file, { call: async () => bad }), /unexpected inbox metadata/);
+  }
+});
+
+test("inboxServer prefers an explicit server and falls back to the project config", async (t) => {
+  const root = await project(t);
+  assert.equal(await inboxServer(root, { server: "http://127.0.0.1:9/mcp" }), "http://127.0.0.1:9/mcp");
+  await assert.rejects(inboxServer(root, {}), /Pass --server/);
+  const config = await initProject(root);
+  assert.equal(await inboxServer(root, {}), config.server);
 });
 
 test("the init executable prints five complete shell-safe launch commands", async (t) => {
