@@ -81,7 +81,10 @@ export default function agentTalk(pi: ExtensionAPI) {
         if (["stalled", "paused", "registration"].includes(nextState)) ctx.ui.notify(message, "warning");
       },
     });
-    await watcher.start();
+    // A healthy empty-inbox check is now held open by the server for up to
+    // 25 seconds; never block session start or command handlers on it. The
+    // watcher reports through the status callback either way.
+    void watcher.start();
   }
 
   pi.on("session_start", async (event, ctx) => {
@@ -115,7 +118,9 @@ export default function agentTalk(pi: ExtensionAPI) {
   pi.on("before_agent_start", (event) => {
     if (event.messageType === "user") void watcher?.resume();
   });
-  pi.on("agent_settled", async (event) => { await watcher?.settled(event.aborted); });
+  // settled() may join a server-held check; applying its flags is synchronous,
+  // so the turn must not wait for the held reply.
+  pi.on("agent_settled", (event) => { void watcher?.settled(event.aborted); });
   pi.on("session_shutdown", () => { stop(); });
 
   pi.registerCommand("agent-talk", {

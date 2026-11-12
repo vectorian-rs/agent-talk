@@ -1,5 +1,10 @@
 import { ClientError } from "./mcp.mjs";
 
+// Every check asks for this flat wait; the server clamp is the single
+// authority on the grant, and the HTTP timeout exceeds any clamped grant.
+const WATCH_WAIT_SECONDS = 25;
+const WATCH_TIMEOUT_MS = WATCH_WAIT_SECONDS * 1000 + 5_000;
+
 // Runtime independent: the host supplies wake(), status() and credential loading.
 // The watcher only calls list_nodes. The main agent remains the sole inbox consumer.
 export class InboxWatcher {
@@ -23,6 +28,7 @@ export class InboxWatcher {
     this.failures = 0;
     this.attempts = 0;
     this.pollIntervalMs = intervalMs;
+    this.immediate = false;
     this.identity = undefined;
     this.head = undefined;
     this.inFlight = undefined;
@@ -65,7 +71,12 @@ export class InboxWatcher {
     this.inFlight = this.poll().finally(() => {
       this.inFlight = undefined;
       if (this.running) {
+        // One scheduling rule: an empty reply the server held open resumes the
+        // watch immediately (the server already paced us); anything else —
+        // mail pending, an unwaited or old-server reply, pauses, errors —
+        // keeps interval pacing and backoff.
         const delay = this.waitingForMembership ? 250 :
+          this.immediate ? 0 :
           Math.min(60_000, this.pollIntervalMs * 2 ** Math.min(this.failures, 3));
         this.timer = this.setTimer(() => void this.check(), delay);
         this.timer?.unref?.();
@@ -77,6 +88,7 @@ export class InboxWatcher {
   async poll() {
     try {
       this.waitingForMembership = false;
+      this.immediate = false;
       const member = await this.loadMembership();
       if (!this.running) return;
       if (!member) {
@@ -105,7 +117,9 @@ export class InboxWatcher {
         ...(text(member.name) && member.name !== member.node_id ? { name: member.name } : {}),
       };
       const result = await this.client.call("list_nodes",
-        { ...labels, node_id: member.node_id, token: member.token }, this.controller.signal);
+        { ...labels, node_id: member.node_id, token: member.token,
+          wait_seconds: WATCH_WAIT_SECONDS },
+        this.controller.signal, WATCH_TIMEOUT_MS);
       if (!this.running) return;
       const inbox = result.inbox;
       if (result.ring_id !== member.ring_id || !Number.isInteger(inbox?.pending_messages) ||
@@ -123,6 +137,7 @@ export class InboxWatcher {
         this.report("paused", "AgentTalk monitoring inbox; automatic turns paused after cancellation. " +
           "Send a prompt or use /agent-talk on to resume.");
       } else if (inbox.pending_messages === 0) {
+        this.immediate = typeof result.waited_seconds === "number" && result.waited_seconds > 0;
         this.report("watching", "AgentTalk watching inbox");
       } else if (this.attempts >= 3 && !this.notified) {
         this.report("stalled", "AgentTalk inbox still unread after three wake-ups; check the session.");

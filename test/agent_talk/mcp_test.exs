@@ -132,6 +132,44 @@ defmodule AgentTalk.MCPTest do
              )
   end
 
+  test "a parked wait blocks only its own session, and a send unblocks it fast", %{url: url} do
+    for name <- [AgentTalk.TestParkPM, AgentTalk.TestParkWatch], do: client(name, url)
+    pm = call(AgentTalk.TestParkPM, "register_node", %{role: "pm"})
+
+    worker =
+      call(AgentTalk.TestParkPM, "register_node", %{role: "worker", ring_token: pm["ring_token"]})
+
+    parked =
+      Task.async(fn ->
+        call(AgentTalk.TestParkWatch, "list_nodes", auth(worker, %{wait_seconds: 10}))
+      end)
+
+    # Let the park reach the hub, then prove independent sessions stay live:
+    # Anubis serializes within a session, so this tests across sessions.
+    Process.sleep(200)
+
+    {elapsed_us, listed} =
+      :timer.tc(fn -> call(AgentTalk.TestParkPM, "list_nodes", auth(pm, %{})) end)
+
+    other_sessions_live = elapsed_us < 2_000_000
+    assert other_sessions_live, "a parked session must not block other MCP sessions"
+    refute Map.has_key?(listed, "waited_seconds"), "plain replies must stay byte-identical"
+
+    sent_at = System.monotonic_time(:millisecond)
+
+    call(
+      AgentTalk.TestParkPM,
+      "communicate",
+      auth(pm, %{action: "send", to: [worker["node_id"]], message: "Unblock the watch"})
+    )
+
+    woken = Task.await(parked, 5_000)
+    unblocked_ms = System.monotonic_time(:millisecond) - sent_at
+    assert unblocked_ms < 2_000, "a send must unblock the parked watch promptly"
+    assert woken["inbox"]["pending_messages"] == 1
+    assert woken["waited_seconds"] > 0
+  end
+
   test "ring scoping and invitation versus node credentials are enforced over MCP", %{url: url} do
     name = AgentTalk.TestScope
     client(name, url)

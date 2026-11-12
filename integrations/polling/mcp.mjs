@@ -26,6 +26,16 @@ export async function readMembership(file) {
   return member;
 }
 
+// The HTTP timeout for a tool call: never below a waited list_nodes grant
+// (held server-side up to wait_seconds, capped at 25s), whatever the caller
+// passed, so a waited call can't abort early and re-park in a loop. Falls back
+// to request()'s own default when nothing constrains it.
+export function httpTimeout(args, timeoutMs) {
+  const held = Number.isInteger(args?.wait_seconds) && args.wait_seconds > 0 ?
+    Math.min(args.wait_seconds * 1000, 25_000) + 5_000 : 0;
+  return Math.max(timeoutMs ?? 0, held) || undefined;
+}
+
 export function validateServerUrl(url) {
   let parsed;
   try { parsed = new URL(url); } catch {
@@ -46,11 +56,13 @@ export class McpClient {
     this.ready = false;
   }
 
-  async call(name, args, signal) {
+  async call(name, args, signal, timeoutMs) {
+    const timeout = httpTimeout(args, timeoutMs);
     for (let attempt = 0; attempt < 2; attempt++) {
       try {
         await this.connect(signal);
-        const result = await this.request("tools/call", { name, arguments: args }, signal);
+        const result = await this.request("tools/call", { name, arguments: args }, signal,
+          false, timeout);
         if (result.isError) {
           // Branch on the server's machine-readable code; prose matching only
           // remains as a fallback for servers that predate error codes.
@@ -96,7 +108,9 @@ export class McpClient {
     return result.tools;
   }
 
-  async request(method, params, signal, notification = false) {
+  // timeoutMs only needs to exceed a server-side hold (a waited list_nodes);
+  // the default matches every immediate call.
+  async request(method, params, signal, notification = false, timeoutMs = 15_000) {
     const id = notification ? undefined : ++this.id;
     const headers = {
       "content-type": "application/json", accept: "application/json, text/event-stream",
@@ -108,8 +122,8 @@ export class McpClient {
       response = await this.fetch(this.url, {
         method: "POST", headers,
         body: JSON.stringify({ jsonrpc: "2.0", id, method, params }),
-        signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(15_000)]) :
-          AbortSignal.timeout(15_000),
+        signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(timeoutMs)]) :
+          AbortSignal.timeout(timeoutMs),
         redirect: "error",
       });
       if (!response.ok) {

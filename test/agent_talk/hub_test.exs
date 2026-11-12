@@ -457,6 +457,110 @@ defmodule AgentTalk.HubTest do
     assert {:ok, %{nodes: []}} = Hub.snapshot(hub)
   end
 
+  describe "long-poll waits" do
+    test "a parked empty-inbox wait wakes the moment mail arrives", %{hub: hub, pm: pm} do
+      worker = join(hub, pm)
+      parked = Task.async(fn -> Hub.list_nodes(auth(worker, %{wait_seconds: 10}), hub) end)
+      await_waiter(hub, worker.node_id)
+      send_message(hub, pm, %{to: [worker.node_id], message: "Wake up"})
+
+      assert {:ok, %{inbox: %{pending_messages: 1}, waited_seconds: waited}} =
+               Task.await(parked, 1000)
+
+      assert waited > 0
+      assert :sys.get_state(hub).waiters == %{}
+      assert {:ok, %{messages: [%{message: "Wake up"}]}} = receive_messages(hub, worker)
+    end
+
+    test "with no mail the park ends after the clamped grant with an empty payload", %{
+      clock: clock
+    } do
+      hub =
+        start_supervised!(
+          Supervisor.child_spec(
+            {Hub, name: nil, ttl_ms: 100, clock: fn -> Agent.get(clock, & &1) end},
+            id: :clamped
+          )
+        )
+
+      pm = register(hub, %{role: "pm"})
+
+      assert {:ok, %{inbox: %{pending_messages: 0}, waited_seconds: waited}} =
+               Hub.list_nodes(auth(pm, %{wait_seconds: 10}), hub)
+
+      granted_half_the_lease = waited == 0.05
+      assert granted_half_the_lease, "the grant must be clamped to ttl/2, not the request"
+      assert :sys.get_state(hub).waiters == %{}
+    end
+
+    test "mail already queued and zero waits return immediately with a zero wait", %{
+      hub: hub,
+      pm: pm
+    } do
+      worker = join(hub, pm)
+      send_message(hub, pm, %{to: [worker.node_id], message: "Queued"})
+
+      assert {:ok, %{inbox: %{pending_messages: 1}, waited_seconds: 0}} =
+               Hub.list_nodes(auth(worker, %{wait_seconds: 10}), hub)
+
+      assert {:ok, %{waited_seconds: 0}} = Hub.list_nodes(auth(pm, %{wait_seconds: 0}), hub)
+    end
+
+    test "a node expiring mid-park is told expired by the sweep", %{
+      hub: hub,
+      pm: pm,
+      clock: clock
+    } do
+      worker = join(hub, pm)
+      parked = Task.async(fn -> Hub.list_nodes(auth(worker, %{wait_seconds: 10}), hub) end)
+      await_waiter(hub, worker.node_id)
+      Agent.update(clock, fn _ -> 2000 end)
+      send(hub, :sweep)
+      assert {:error, :expired, _} = Task.await(parked, 1000)
+      assert :sys.get_state(hub).waiters == %{}
+    end
+
+    test "a second park releases the first and survives the first park's stale timeout", %{
+      hub: hub,
+      pm: pm
+    } do
+      worker = join(hub, pm)
+      first = Task.async(fn -> Hub.list_nodes(auth(worker, %{wait_seconds: 10}), hub) end)
+      await_waiter(hub, worker.node_id)
+      {_from, stale_timer, _args} = :sys.get_state(hub).waiters[worker.node_id]
+      second = Task.async(fn -> Hub.list_nodes(auth(worker, %{wait_seconds: 10}), hub) end)
+
+      assert {:ok, %{inbox: %{pending_messages: 0}, waited_seconds: waited}} =
+               Task.await(first, 1000)
+
+      assert waited > 0
+      send(hub, {:timeout, stale_timer, {:waiter_timeout, worker.node_id}})
+      assert map_size(:sys.get_state(hub).waiters) == 1
+      send_message(hub, pm, %{to: [worker.node_id], message: "For the second park"})
+      assert {:ok, %{inbox: %{pending_messages: 1}}} = Task.await(second, 1000)
+      assert :sys.get_state(hub).waiters == %{}
+    end
+
+    test "plain calls stay byte-identical and bad waits are rejected", %{hub: hub, pm: pm} do
+      assert {:ok, plain} = Hub.list_nodes(auth(pm), hub)
+      refute Map.has_key?(plain, :waited_seconds)
+
+      for bad <- ["x", -1, 1.5] do
+        assert {:error, :invalid_request, message} =
+                 Hub.list_nodes(auth(pm, %{wait_seconds: bad}), hub)
+
+        assert message =~ "wait_seconds"
+      end
+    end
+  end
+
+  defp await_waiter(hub, node_id) do
+    unless Map.has_key?(:sys.get_state(hub).waiters, node_id) do
+      Process.sleep(5)
+      await_waiter(hub, node_id)
+    end
+  end
+
   defp register(hub, args) do
     {:ok, node} = Hub.register(args, hub)
     node
