@@ -43,7 +43,7 @@
   .ring-selector .small-label { color: var(--muted); font-size: .65rem; }
   .ring-empty { color: var(--muted); font-size: .75rem; }
   .ring-chips { display: flex; flex-wrap: wrap; gap: .35rem; }
-  .ring-chip { border: 1px solid var(--stroke); border-radius: 999px; padding: .2rem .65rem; background: var(--surface); color: var(--muted); font: .72rem var(--sans); cursor: pointer; white-space: nowrap; }
+  .ring-chip { max-width: 100%; border: 1px solid var(--stroke); border-radius: 999px; padding: .2rem .65rem; background: var(--surface); color: var(--muted); font: .72rem var(--sans); cursor: pointer; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   .ring-chip:hover { color: var(--ink); border-color: var(--ink); }
   .ring-chip.is-selected { background: var(--ink); color: var(--on-ink); border-color: var(--ink); }
   .history-export { display: flex; flex-direction: column; gap: .4rem; padding-block: .25rem .75rem; }
@@ -142,6 +142,7 @@
     .empty-messages { min-height: 18rem; }
   }
   @media (width < 30em) {
+    .agent-list { grid-template-columns: minmax(0, 1fr); }
     .console-heading h1 { font-size: 2.2rem; }
     .console-intro { font-size: .85rem; }
     .console-stats { gap: 2rem; }

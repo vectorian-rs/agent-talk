@@ -231,8 +231,13 @@ defmodule AgentTalk.Hub do
   @impl true
   def handle_info({:timeout, timer, {:waiter_timeout, node_id}}, state) do
     case Map.get(state.waiters, node_id) do
-      {_from, ^timer, _args} -> {:noreply, wake_waiter(state, node_id)}
-      _ -> {:noreply, state}
+      {_from, ^timer, _args} ->
+        # Expire first, as handle_call and :sweep do: a lease that lapsed while
+        # parked must not be revived by the timeout's renewing re-dispatch.
+        {:noreply, wake_waiter(expire_nodes(state, state.clock.()), node_id)}
+
+      _ ->
+        {:noreply, state}
     end
   end
 
@@ -254,6 +259,8 @@ defmodule AgentTalk.Hub do
   # yields the usual expired error), and only waited_seconds — the original
   # grant, recomputed — is layered on top. The re-dispatch renews the lease,
   # a presence-only change, so it is deferred to the regular presence flush.
+  # Label fields are dropped: they were applied when the request first arrived,
+  # so replaying them would revert a renewal that landed while the caller parked.
   defp wake_waiter(state, node_id) do
     case Map.pop(state.waiters, node_id) do
       {nil, _waiters} ->
@@ -265,7 +272,11 @@ defmodule AgentTalk.Hub do
         {:ok, wait_ms} = effective_wait(args, state)
 
         {reply, updated} =
-          dispatch({:list, Map.delete(args, :wait_seconds)}, state, state.clock.())
+          dispatch(
+            {:list, Map.drop(args, [:wait_seconds | @label_fields])},
+            state,
+            state.clock.()
+          )
 
         GenServer.reply(
           from,

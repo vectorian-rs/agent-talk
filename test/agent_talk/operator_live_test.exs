@@ -134,7 +134,12 @@ defmodule AgentTalk.OperatorLiveTest do
            )
 
     send_message(other_pm, other_worker.node_id, "Unselected ring update")
-    assert has_element?(view, "#ring-select .ring-chip.is-selected[phx-value-ring='#{pm.ring_id}']")
+
+    assert has_element?(
+             view,
+             "#ring-select .ring-chip.is-selected[phx-value-ring='#{pm.ring_id}']"
+           )
+
     refute has_element?(view, "#message-stream", "Unselected ring update")
     assert has_element?(view, "#message-count", "1")
 
@@ -143,7 +148,11 @@ defmodule AgentTalk.OperatorLiveTest do
     |> render_change()
 
     assert has_element?(view, "#no-matches")
-    view |> element("#ring-select .ring-chip[phx-value-ring='#{other_pm.ring_id}']") |> render_click()
+
+    view
+    |> element("#ring-select .ring-chip[phx-value-ring='#{other_pm.ring_id}']")
+    |> render_click()
+
     assert has_element?(view, "#message-stream", "Tax task")
     assert has_element?(view, "#message-stream", "Unselected ring update")
     assert has_element?(view, "#message-count", "2")
@@ -192,8 +201,25 @@ defmodule AgentTalk.OperatorLiveTest do
 
     assert has_element?(view, "#message-stream", "Standup in five")
     assert has_element?(view, "#message-stream .party-name", "Operator")
+
     assert {:ok, %{messages: [%{message: "Standup in five"}]}} =
              Hub.communicate(auth(worker, %{action: "receive"}))
+  end
+
+  test "a broadcast draft is dropped when its ring disappears, not retargeted to another ring" do
+    pm_a = register(%{role: "pm", project: "aaa", name: "aaa / pm"})
+    register(%{role: "pm", project: "bbb", name: "bbb / pm"})
+    {:ok, view, _} = live(build_conn(), "/")
+
+    view |> element("#ring-select .ring-chip[phx-value-ring='#{pm_a.ring_id}']") |> render_click()
+    view |> form("#operator-broadcast", %{message: "draft for ring A"}) |> render_change()
+    assert render(view) =~ "draft for ring A"
+
+    # Ring A vanishes when its only member is evicted; the view falls back to
+    # another ring, and the draft must not travel with it.
+    Hub.evict(pm_a.node_id)
+
+    refute render(view) =~ "draft for ring A"
   end
 
   defp reset_hub do
