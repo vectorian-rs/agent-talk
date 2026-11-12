@@ -385,6 +385,31 @@ defmodule AgentTalk.HubTest do
     assert Enum.sort(recipients) == Enum.sort([first.node_id, second.node_id])
   end
 
+  test "status reports a sender's own messages and who has received each", %{hub: hub, pm: pm} do
+    first = join(hub, pm)
+    second = join(hub, pm)
+
+    assert {:ok, %{message_id: id}} =
+             send_message(hub, pm, %{to_role: "worker", message: "Start"})
+
+    assert {:ok, %{sent: [sent]}} = Hub.communicate(auth(pm, %{action: "status"}), hub)
+    assert sent.id == id
+    assert Enum.sort(sent.to) == Enum.sort([first.node_id, second.node_id])
+    assert sent.received_by == []
+    assert Enum.sort(sent.pending) == Enum.sort([first.node_id, second.node_id])
+
+    receive_messages(hub, first)
+    assert {:ok, %{sent: [updated]}} = Hub.communicate(auth(pm, %{action: "status"}), hub)
+    assert updated.received_by == [first.node_id]
+    assert updated.pending == [second.node_id]
+
+    # A recipient that has sent nothing sees an empty list, never the PM's send.
+    assert {:ok, %{sent: []}} = Hub.communicate(auth(first, %{action: "status"}), hub)
+
+    assert {:error, :invalid_request, _} =
+             Hub.communicate(auth(pm, %{action: "status", message: "x"}), hub)
+  end
+
   test "configured history limit trims the log without truncating the inbox" do
     hub =
       start_supervised!(

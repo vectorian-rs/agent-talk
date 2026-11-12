@@ -1,6 +1,7 @@
 # Plan: read receipts (delivery visibility for the sender)
 
-Status: draft (plan only). Least-complexity design for review before implementing.
+Status: implemented on top of main. A read-only `communicate status` action
+returns the caller's own recent sends with per-recipient received/pending state.
 
 ## Problem
 

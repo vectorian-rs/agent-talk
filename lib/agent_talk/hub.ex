@@ -597,6 +597,34 @@ defmodule AgentTalk.Hub do
     end
   end
 
+  # Read-only delivery visibility for the sender: its own recent sends still in
+  # the history window, each with who has received it and who is still pending.
+  # Derives entirely from state.messages; mutates nothing (the lease was already
+  # renewed by authenticate/3).
+  defp communicate(%{action: "status"} = args, state, node) do
+    if Map.get(args, :to) != nil or Map.get(args, :to_role) != nil or
+         Map.get(args, :message) != nil or Map.get(args, :reply_to) != nil do
+      {{:error, :invalid_request, "status takes no to, to_role, message or reply_to fields"},
+       state}
+    else
+      sent =
+        state.messages
+        |> Enum.filter(&(&1.from == node.node_id))
+        |> Enum.map(fn event ->
+          %{
+            id: event.id,
+            to: event.to,
+            received_by: event.received_by,
+            pending: event.to -- event.received_by,
+            sent_at: event.sent_at,
+            reply_to: event.reply_to
+          }
+        end)
+
+      {{:ok, %{sent: sent}}, state}
+    end
+  end
+
   defp recipients(args, nodes, sender) do
     to = Map.get(args, :to)
     role = Map.get(args, :to_role)
