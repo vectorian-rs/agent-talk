@@ -267,6 +267,20 @@ defmodule AgentTalk.HubTest do
     assert Enum.map(messages, & &1.message) == ["First", "Second"]
   end
 
+  test "a received message carries the sender's name and role, not just its id", %{hub: hub} do
+    pm = register(hub, %{role: "pm", project: "hiko", name: "hiko / pm"})
+    worker = join(hub, pm)
+
+    assert {:ok, %{message_id: id}} =
+             send_message(hub, pm, %{to: [worker.node_id], message: "Build it"})
+
+    # The delivered copy names the sender so a recipient need not call list_nodes
+    # to learn who messaged it; the id still drives replies.
+    assert {:ok, %{messages: [message]}} = receive_messages(hub, worker)
+    assert %{id: ^id, from: from, from_name: "hiko / pm", from_role: "pm"} = message
+    assert from == pm.node_id
+  end
+
   test "unknown recipients and inbox capacity reject the whole broadcast", %{hub: hub, pm: pm} do
     worker = join(hub, pm)
     other = join(hub, pm)
@@ -488,7 +502,9 @@ defmodule AgentTalk.HubTest do
   end
 
   test "an operator broadcast refuses an empty ring and a blank message", %{hub: hub, pm: pm} do
-    assert {:error, :invalid_request, _} = Hub.broadcast("ring-404", "Anyone?", hub)
+    # A non-numeric ring id can never collide with an allocated "ring-<integer>",
+    # unlike a hardcoded number which the global id counter can reach.
+    assert {:error, :invalid_request, _} = Hub.broadcast("ring-absent", "Anyone?", hub)
     assert {:error, :invalid_request, _} = Hub.broadcast(pm.ring_id, "   ", hub)
 
     assert {:ok, %{messages: []}} = receive_messages(hub, pm),
