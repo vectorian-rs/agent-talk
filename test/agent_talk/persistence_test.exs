@@ -168,11 +168,13 @@ defmodule AgentTalk.PersistenceTest do
                Hub.list_nodes(auth(worker), hub)
 
       assert {:ok, %{messages: [restored, %{id: ^second}]}} = receive_messages(hub, worker)
-      assert %{id: ^first, message: "First"} = restored
+      assert %{id: ^first, message: "First", from_role: "pm"} = restored
       assert restored.from == pm.node_id
 
       assert Enum.sort(Map.keys(restored)) == [
                :from,
+               :from_name,
+               :from_role,
                :id,
                :message,
                :reply_to,

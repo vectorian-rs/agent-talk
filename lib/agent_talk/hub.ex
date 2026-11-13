@@ -20,7 +20,10 @@ defmodule AgentTalk.Hub do
   # The inbox copy of a message. Recovery rebuilds exactly this shape from
   # archived events, so live sends and restored copies must share this one
   # definition; UI/archive-only metadata stays out of inbox payloads.
-  @message_fields [:id, :from, :ring_id, :message, :sent_at, :reply_to]
+  # from_name/from_role travel with the copy so a recipient can read who sent a
+  # message without a separate list_nodes lookup; both are in History's @fields,
+  # so a recovered copy carries them too.
+  @message_fields [:id, :from, :from_name, :from_role, :ring_id, :message, :sent_at, :reply_to]
 
   # Synthetic sender for operator broadcasts. "operator" is not a registered
   # node and owns no token, so it can address a ring but never authenticate.
