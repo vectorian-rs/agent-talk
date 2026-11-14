@@ -32,6 +32,7 @@ export class InboxWatcher {
     this.identity = undefined;
     this.head = undefined;
     this.inFlight = undefined;
+    this.runId = 0;
     this.timer = undefined;
     this.lastStatus = undefined;
     this.lastCheck = undefined;
@@ -48,6 +49,11 @@ export class InboxWatcher {
 
   stop() {
     this.running = false;
+    // Invalidate the in-flight poll's continuation and drop its handle, so a
+    // restart begins a fresh check at once instead of reusing the aborted poll,
+    // whose backoff would otherwise delay the next check.
+    this.runId++;
+    this.inFlight = undefined;
     this.clearTimer(this.timer);
     this.controller.abort();
   }
@@ -71,7 +77,11 @@ export class InboxWatcher {
     if (!this.running) return Promise.resolve();
     if (this.inFlight) return this.inFlight;
     this.clearTimer(this.timer);
+    const runId = this.runId;
     this.inFlight = this.poll().finally(() => {
+      // A stop() since this poll began bumped runId; its continuation must not
+      // clear a newer run's in-flight handle or schedule a stale retry.
+      if (runId !== this.runId) return;
       this.inFlight = undefined;
       if (this.running) {
         // One scheduling rule: an empty reply the server held open resumes the

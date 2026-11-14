@@ -244,17 +244,20 @@ defmodule AgentTalk.Hub do
         now = state.clock.()
         expired = expire_nodes(state, now)
 
-        flushed =
-          case persist(state, expired, now) do
-            {:ok, persisted} ->
-              notify_if_changed(state, persisted)
-              persisted
+        case persist(state, expired, now) do
+          {:ok, persisted} ->
+            notify_if_changed(state, persisted)
+            {:noreply, wake_waiter(persisted, node_id)}
 
-            {:error, _} ->
-              expired
-          end
-
-        {:noreply, wake_waiter(flushed, node_id)}
+          {:error, _} ->
+            # The expiry write failed; keep the nodes in memory so the next sweep
+            # retries the save and announce, exactly as :sweep does on a failed
+            # write. Committing the removal here would leave disk and the dashboard
+            # stale with no later change to trigger a retry. The parked caller is
+            # still released; a node whose lease truly lapsed is re-expired on the
+            # next successful sweep.
+            {:noreply, wake_waiter(state, node_id)}
+        end
 
       _ ->
         {:noreply, state}
