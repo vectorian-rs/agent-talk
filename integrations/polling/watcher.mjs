@@ -201,8 +201,9 @@ export class InboxWatcher {
       this.lastWake = new Date().toISOString();
       return true;
     } catch {
-      // The caller owns failure counting (the recovery path already counted this
-      // failure once), so returning false is enough here.
+      // A stale run (stopped, maybe restarted) must not overwrite the live run's
+      // status with this error. The caller owns failure counting.
+      if (this.stale(runId)) return false;
       this.report("error", "AgentTalk could not request a turn; retrying automatically.");
       return false;
     }

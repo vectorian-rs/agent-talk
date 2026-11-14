@@ -181,6 +181,29 @@ test("a wake resolving after a stop does not clear a restarted run's notified fl
   watcher.stop();
 });
 
+test("a wake rejecting on a stale run does not overwrite the live status", async () => {
+  let rejectWake;
+  const wakeGate = new Promise((_res, rej) => { rejectWake = rej; });
+  let wakeCount = 0;
+  const statuses = [];
+  const watcher = new InboxWatcher({
+    loadMembership: async () => ({ node_id: "n-1", token: "test-only", ring_id: "r-1", role: "worker" }),
+    client: { call: async () => ({ ring_id: "r-1", inbox: { pending_messages: 1, next_message_id: "m-1" } }) },
+    wake: async () => { wakeCount++; if (wakeCount === 1) await wakeGate; }, // first wake hangs, then rejects
+    status: (s) => statuses.push(s),
+    setTimer: () => 0,
+    clearTimer: () => {},
+  });
+  watcher.start(); // run #1: pending mail starts wake #1, which hangs
+  await new Promise((r) => setTimeout(r, 0));
+  watcher.stop();
+  await watcher.start(); // restart
+  rejectWake(new Error("wake failed after stop"));
+  await new Promise((r) => setTimeout(r, 0));
+  assert.ok(!statuses.some((s) => s.state === "error"), "a stale rejected wake must not report an error");
+  watcher.stop();
+});
+
 test("an empty held reply resumes the watch immediately; anything else keeps pacing", async () => {
   const f = fixture();
   f.state.waited = 25;
