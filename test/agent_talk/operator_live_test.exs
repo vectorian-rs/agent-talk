@@ -222,6 +222,24 @@ defmodule AgentTalk.OperatorLiveTest do
     refute render(view) =~ "draft for ring A"
   end
 
+  test "a broadcast is refused when its composed ring no longer matches the selection" do
+    pm = register(%{role: "pm", project: "hiko", name: "hiko / pm"})
+    worker = join(pm)
+    {:ok, view, _} = live(build_conn(), "/")
+
+    # The submit carries the ring it was composed against. If that no longer
+    # matches the live selection (e.g. the ring vanished and the view fell back
+    # while a confirmation dialog held the stale DOM), the broadcast is refused,
+    # not redirected to the now-selected ring. render_submit on the element lets
+    # the test post the stale ring that a blocked client would still hold.
+    view
+    |> element("#operator-broadcast")
+    |> render_submit(%{"message" => "wrong ring", "ring" => "ring-not-selected"})
+
+    assert render(view) =~ "selected ring changed"
+    assert {:ok, %{messages: []}} = Hub.communicate(auth(worker, %{action: "receive"}))
+  end
+
   test "re-selecting the current ring keeps an in-progress broadcast draft" do
     pm = register(%{role: "pm", project: "hiko", name: "hiko / pm"})
     {:ok, view, _} = live(build_conn(), "/")

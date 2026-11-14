@@ -57,14 +57,26 @@ defmodule AgentTalk.Web.OperatorLive do
   def handle_event("compose", %{"message" => message}, socket),
     do: {:noreply, assign(socket, :compose, message)}
 
-  def handle_event("broadcast", %{"message" => message}, socket) do
+  def handle_event("broadcast", %{"message" => message, "ring" => ring}, socket) do
     # Trusted local surface: broadcasting into the selected ring needs no token.
+    # The submit carries the ring it was composed and confirmed against; if the
+    # selection changed since (e.g. that ring vanished and the view fell back to
+    # another), refuse rather than deliver to a ring the operator never confirmed.
     # On success the hub's pubsub refresh re-renders every view and we clear the
     # box; a capacity or storage error is surfaced and the draft is kept.
-    case socket.assigns.ring && Hub.broadcast(socket.assigns.ring, message) do
-      {:ok, _} -> {:noreply, assign(socket, :compose, "")}
-      {:error, _code, msg} -> {:noreply, put_flash(socket, :error, msg)}
-      nil -> {:noreply, socket}
+    cond do
+      socket.assigns.ring == nil ->
+        {:noreply, socket}
+
+      ring != socket.assigns.ring ->
+        {:noreply,
+         put_flash(socket, :error, "The selected ring changed before sending; nothing was sent.")}
+
+      true ->
+        case Hub.broadcast(socket.assigns.ring, message) do
+          {:ok, _} -> {:noreply, assign(socket, :compose, "")}
+          {:error, _code, msg} -> {:noreply, put_flash(socket, :error, msg)}
+        end
     end
   end
 
@@ -267,6 +279,7 @@ defmodule AgentTalk.Web.OperatorLive do
               phx-change="compose"
               phx-submit="broadcast"
             >
+              <input type="hidden" name="ring" value={@ring} />
               <label for="broadcast-message" class="small-label">Broadcast to ring</label>
               <textarea
                 id="broadcast-message"

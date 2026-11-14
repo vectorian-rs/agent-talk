@@ -128,6 +128,30 @@ test("a stopped watcher can be restarted on the same instance with a fresh abort
   watcher.stop();
 });
 
+test("restarting during an in-flight poll starts a fresh check, not the aborted one", async () => {
+  let release;
+  const gate = new Promise((r) => { release = r; });
+  let callCount = 0;
+  const watcher = new InboxWatcher({
+    loadMembership: async () => ({ node_id: "n-1", token: "test-only", ring_id: "r-1", role: "worker" }),
+    client: { call: async (_name, _args, signal) => {
+      callCount++;
+      if (callCount === 1) await gate; // the first poll hangs until released
+      if (signal?.aborted) throw new ClientError("transport", "aborted");
+      return { ring_id: "r-1", inbox: { pending_messages: 0, next_message_id: null } };
+    } },
+    wake: () => {},
+    clearTimer: () => {},
+  });
+  watcher.start(); // poll #1 starts and hangs on the gate
+  watcher.stop(); // aborts and abandons poll #1
+  const restart = watcher.start(); // must issue poll #2 now, not reuse poll #1
+  release();
+  await restart;
+  assert.ok(callCount >= 2, "the restart issued a fresh list_nodes check");
+  watcher.stop();
+});
+
 test("an empty held reply resumes the watch immediately; anything else keeps pacing", async () => {
   const f = fixture();
   f.state.waited = 25;
