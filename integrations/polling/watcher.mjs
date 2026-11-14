@@ -1,9 +1,9 @@
-import { ClientError } from "./mcp.mjs";
+import { ClientError, validateInboxMetadata } from "./mcp.mjs";
 
-// Every check asks for this flat wait; the server clamp is the single
-// authority on the grant, and the HTTP timeout exceeds any clamped grant.
+// Every check asks for this flat wait; the server clamp is the single authority
+// on the grant. McpClient.call derives the HTTP timeout from wait_seconds (the
+// clamped grant plus slack), so no separate timeout constant is needed here.
 const WATCH_WAIT_SECONDS = 25;
-const WATCH_TIMEOUT_MS = WATCH_WAIT_SECONDS * 1000 + 5_000;
 
 // Runtime independent: the host supplies wake(), status() and credential loading.
 // The watcher only calls list_nodes. The main agent remains the sole inbox consumer.
@@ -40,6 +40,9 @@ export class InboxWatcher {
 
   start() {
     this.running = true;
+    // stop() aborts the controller; a restart on the same instance needs a fresh
+    // one, or every request would abort on the already-aborted signal.
+    if (this.controller.signal.aborted) this.controller = new AbortController();
     return this.check();
   }
 
@@ -119,14 +122,10 @@ export class InboxWatcher {
       const result = await this.client.call("list_nodes",
         { ...labels, node_id: member.node_id, token: member.token,
           wait_seconds: WATCH_WAIT_SECONDS },
-        this.controller.signal, WATCH_TIMEOUT_MS);
+        this.controller.signal);
       if (!this.running) return;
-      const inbox = result.inbox;
-      if (result.ring_id !== member.ring_id || !Number.isInteger(inbox?.pending_messages) ||
-          inbox.pending_messages < 0 || (inbox.pending_messages === 0 ? inbox.next_message_id !== null :
-            typeof inbox.next_message_id !== "string" || inbox.next_message_id.length === 0)) {
-        throw new ClientError("protocol", "Update AgentTalk: list_nodes must return inbox metadata.");
-      }
+      const inbox = validateInboxMetadata(result, member.ring_id,
+        "Update AgentTalk: list_nodes must return inbox metadata.");
       this.lastCheck = new Date().toISOString();
       this.authNotified = false;
       if (inbox.next_message_id !== this.head) {
@@ -149,6 +148,9 @@ export class InboxWatcher {
         if (!sent) {
           this.notified = false;
           this.attempts = Math.max(0, this.attempts - 1);
+          // A failed wake here is the only failure this success path saw, so
+          // count it for backoff; the catch block already counts its own.
+          this.failures++;
           return;
         }
         this.report("pending", "AgentTalk inbox: " + inbox.pending_messages + " · turn requested");
@@ -177,7 +179,8 @@ export class InboxWatcher {
       this.lastWake = new Date().toISOString();
       return true;
     } catch {
-      this.failures++;
+      // The caller owns failure counting (the recovery path already counted this
+      // failure once), so returning false is enough here.
       this.report("error", "AgentTalk could not request a turn; retrying automatically.");
       return false;
     }

@@ -2,7 +2,7 @@ import { access, readFile, writeFile, mkdir, chmod, open, rename, rm } from "nod
 import { basename, join } from "node:path";
 import { randomBytes } from "node:crypto";
 import { parse, stringify } from "smol-toml";
-import { ClientError, McpClient, readMembership, validateServerUrl } from "../integrations/polling/mcp.mjs";
+import { ClientError, McpClient, readMembership, validateInboxMetadata, validateServerUrl } from "../integrations/polling/mcp.mjs";
 
 const keys = ["server", "client", "project", "team", "workers"];
 const error = (message) => new ClientError("configuration", message);
@@ -108,16 +108,9 @@ export async function connect(server) {
 export async function inbox(file, client) {
   const member = await readMembership(file);
   if (!member) throw error("No saved AgentTalk registration at " + file + ".");
-  const { ring_id, inbox } = await client.call("list_nodes",
-    { node_id: member.node_id, token: member.token });
-  // Same shape check the watcher applies: a consistent, non-negative count with
-  // a next id present exactly when mail is pending.
-  if (ring_id !== member.ring_id || !Number.isInteger(inbox?.pending_messages) ||
-      inbox.pending_messages < 0 ||
-      (inbox.pending_messages === 0 ? inbox.next_message_id !== null :
-        typeof inbox.next_message_id !== "string" || inbox.next_message_id.length === 0)) {
-    throw new ClientError("protocol", "AgentTalk returned unexpected inbox metadata.");
-  }
+  const result = await client.call("list_nodes", { node_id: member.node_id, token: member.token });
+  const inbox = validateInboxMetadata(result, member.ring_id,
+    "AgentTalk returned unexpected inbox metadata.");
   return { node_id: member.node_id, pending: inbox.pending_messages, next: inbox.next_message_id };
 }
 

@@ -108,9 +108,16 @@ export default function agentTalk(pi: ExtensionAPI) {
       pi.appendEntry(settingsType, settings);
     }
     if (!settings && event.reason === "startup" && typeof file === "string" && file) {
-      settings = { file: resolve(ctx.cwd, file), url: String(pi.getFlag("agent-talk-url")),
-        session, enabled: true };
-      pi.appendEntry(settingsType, settings);
+      // Validate like the repair branch above before persisting, so a malformed
+      // launch flag (not .json, or containing CR/LF/NUL) never writes a settings
+      // entry the repair branch could not later fix; warn instead.
+      if (validFile(file)) {
+        settings = { file: resolve(ctx.cwd, file), url: String(pi.getFlag("agent-talk-url")),
+          session, enabled: true };
+        pi.appendEntry(settingsType, settings);
+      } else if (ctx.hasUI) {
+        ctx.ui.notify("AgentTalk needs a membership .json path. Use --agent-talk-membership <membership.json>.", "warning");
+      }
     }
     await start(ctx);
   });

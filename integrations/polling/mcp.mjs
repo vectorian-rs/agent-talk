@@ -26,6 +26,26 @@ export async function readMembership(file) {
   return member;
 }
 
+// A list_nodes result must echo the caller's ring and carry consistent inbox
+// metadata: a non-negative integer count with next_message_id present exactly
+// when mail is pending. The watcher and the CLI both check this identical shape,
+// so it lives here once; each caller supplies its own protocol-error message.
+// Returns the validated inbox.
+export function validateInboxMetadata(result, expectedRingId, message) {
+  const inbox = result?.inbox;
+  if (
+    result?.ring_id !== expectedRingId ||
+    !Number.isInteger(inbox?.pending_messages) ||
+    inbox.pending_messages < 0 ||
+    (inbox.pending_messages === 0
+      ? inbox.next_message_id !== null
+      : typeof inbox.next_message_id !== "string" || inbox.next_message_id.length === 0)
+  ) {
+    throw new ClientError("protocol", message);
+  }
+  return inbox;
+}
+
 // The HTTP timeout for a tool call: never below a waited list_nodes grant
 // (held server-side up to wait_seconds, capped at 25s), whatever the caller
 // passed, so a waited call can't abort early and re-park in a loop. Falls back
