@@ -128,6 +128,82 @@ test("a stopped watcher can be restarted on the same instance with a fresh abort
   watcher.stop();
 });
 
+test("a run stopped during loadMembership issues no request after a restart", async () => {
+  let releaseLoad;
+  const loadGate = new Promise((r) => { releaseLoad = r; });
+  let loadCount = 0, callCount = 0;
+  const watcher = new InboxWatcher({
+    loadMembership: async () => {
+      loadCount++;
+      if (loadCount === 1) await loadGate; // the first run hangs in loadMembership
+      return { node_id: "n-1", token: "test-only", ring_id: "r-1", role: "worker" };
+    },
+    client: { call: async (_name, _args, signal) => {
+      callCount++;
+      if (signal?.aborted) throw new ClientError("transport", "aborted");
+      return { ring_id: "r-1", inbox: { pending_messages: 0, next_message_id: null } };
+    } },
+    wake: () => {},
+    clearTimer: () => {},
+  });
+  watcher.start(); // run #1 hangs in loadMembership
+  watcher.stop(); // stopped before it ever reached the request
+  const restart = watcher.start(); // run #2 loads fresh and issues the one request
+  releaseLoad(); // run #1 resumes; it must bail, not issue a second request
+  await restart;
+  await new Promise((r) => setTimeout(r, 0)); // flush run #1's continuation
+  assert.equal(callCount, 1, "only the restarted run issues a request");
+  watcher.stop();
+});
+
+test("a wake resolving after a stop does not clear a restarted run's notified flag", async () => {
+  let releaseWake;
+  const wakeGate = new Promise((r) => { releaseWake = r; });
+  let wakeCount = 0;
+  const watcher = new InboxWatcher({
+    loadMembership: async () => ({ node_id: "n-1", token: "test-only", ring_id: "r-1", role: "worker" }),
+    client: { call: async () => ({ ring_id: "r-1", inbox: { pending_messages: 1, next_message_id: "m-1" } }) },
+    wake: async () => { wakeCount++; if (wakeCount === 1) await wakeGate; }, // the first wake hangs
+    setTimer: () => 0, // no real reschedule during the test
+    clearTimer: () => {},
+  });
+  watcher.start(); // run #1: pending mail sets notified and starts wake #1, which hangs
+  await new Promise((r) => setTimeout(r, 0));
+  assert.equal(watcher.notified, true);
+  watcher.stop();
+  await watcher.start(); // run #2 sees notified still set and does not wake again
+  releaseWake(); // the stale wake #1 now resolves
+  await new Promise((r) => setTimeout(r, 0));
+  // A fresh check must not wake again: a stale run that cleared notified would
+  // have let it. (Without the fix, poll's !sent branch clears it.)
+  await watcher.check();
+  assert.equal(wakeCount, 1, "a stale run clearing notified causes a duplicate wake");
+  watcher.stop();
+});
+
+test("a wake rejecting on a stale run does not overwrite the live status", async () => {
+  let rejectWake;
+  const wakeGate = new Promise((_res, rej) => { rejectWake = rej; });
+  let wakeCount = 0;
+  const statuses = [];
+  const watcher = new InboxWatcher({
+    loadMembership: async () => ({ node_id: "n-1", token: "test-only", ring_id: "r-1", role: "worker" }),
+    client: { call: async () => ({ ring_id: "r-1", inbox: { pending_messages: 1, next_message_id: "m-1" } }) },
+    wake: async () => { wakeCount++; if (wakeCount === 1) await wakeGate; }, // first wake hangs, then rejects
+    status: (s) => statuses.push(s),
+    setTimer: () => 0,
+    clearTimer: () => {},
+  });
+  watcher.start(); // run #1: pending mail starts wake #1, which hangs
+  await new Promise((r) => setTimeout(r, 0));
+  watcher.stop();
+  await watcher.start(); // restart
+  rejectWake(new Error("wake failed after stop"));
+  await new Promise((r) => setTimeout(r, 0));
+  assert.ok(!statuses.some((s) => s.state === "error"), "a stale rejected wake must not report an error");
+  watcher.stop();
+});
+
 test("an empty held reply resumes the watch immediately; anything else keeps pacing", async () => {
   const f = fixture();
   f.state.waited = 25;

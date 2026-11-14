@@ -32,6 +32,7 @@ export class InboxWatcher {
     this.identity = undefined;
     this.head = undefined;
     this.inFlight = undefined;
+    this.runId = 0;
     this.timer = undefined;
     this.lastStatus = undefined;
     this.lastCheck = undefined;
@@ -48,6 +49,11 @@ export class InboxWatcher {
 
   stop() {
     this.running = false;
+    // Invalidate the in-flight poll's continuation and drop its handle, so a
+    // restart begins a fresh check at once instead of reusing the aborted poll,
+    // whose backoff would otherwise delay the next check.
+    this.runId++;
+    this.inFlight = undefined;
     this.clearTimer(this.timer);
     this.controller.abort();
   }
@@ -71,7 +77,11 @@ export class InboxWatcher {
     if (!this.running) return Promise.resolve();
     if (this.inFlight) return this.inFlight;
     this.clearTimer(this.timer);
-    this.inFlight = this.poll().finally(() => {
+    const runId = this.runId;
+    this.inFlight = this.poll(runId).finally(() => {
+      // A stop() since this poll began bumped runId; its continuation must not
+      // clear a newer run's in-flight handle or schedule a stale retry.
+      if (runId !== this.runId) return;
       this.inFlight = undefined;
       if (this.running) {
         // One scheduling rule: an empty reply the server held open resumes the
@@ -88,12 +98,19 @@ export class InboxWatcher {
     return this.inFlight;
   }
 
-  async poll() {
+  // A stop() bumps runId; a run must bail after every async step if it was
+  // stopped (and possibly restarted) meanwhile, or it would issue a second
+  // request on the restart's controller.
+  stale(runId) {
+    return !this.running || runId !== this.runId;
+  }
+
+  async poll(runId) {
     try {
       this.waitingForMembership = false;
       this.immediate = false;
       const member = await this.loadMembership();
-      if (!this.running) return;
+      if (this.stale(runId)) return;
       if (!member) {
         this.waitingForMembership = true;
         this.report("waiting", "AgentTalk waiting for this session's saved registration.");
@@ -123,7 +140,7 @@ export class InboxWatcher {
         { ...labels, node_id: member.node_id, token: member.token,
           wait_seconds: WATCH_WAIT_SECONDS },
         this.controller.signal);
-      if (!this.running) return;
+      if (this.stale(runId)) return;
       const inbox = validateInboxMetadata(result, member.ring_id,
         "Update AgentTalk: list_nodes must return inbox metadata.");
       this.lastCheck = new Date().toISOString();
@@ -144,7 +161,10 @@ export class InboxWatcher {
         this.notified = true;
         this.attempts++;
         const sent = await this.requestWake({ kind: "inbox", node_id: member.node_id, role: member.role,
-          ring_id: member.ring_id, pending_messages: inbox.pending_messages });
+          ring_id: member.ring_id, pending_messages: inbox.pending_messages }, runId);
+        // A stop() during the wake must not let this run clear the restarted
+        // run's notified flag, which would let it wake a second time.
+        if (this.stale(runId)) return;
         if (!sent) {
           this.notified = false;
           this.attempts = Math.max(0, this.attempts - 1);
@@ -157,13 +177,15 @@ export class InboxWatcher {
       }
       this.failures = 0;
     } catch (error) {
-      if (!this.running) return;
+      if (this.stale(runId)) return;
       this.failures++;
       if (["expired", "token"].includes(error.code)) {
         this.report("registration", error.message);
         if (!this.paused && !this.authNotified) {
           this.authNotified = true;
-          if (!await this.requestWake({ kind: "recovery" })) this.authNotified = false;
+          const woke = await this.requestWake({ kind: "recovery" }, runId);
+          if (this.stale(runId)) return;
+          if (!woke) this.authNotified = false;
         }
       } else {
         this.report("error", error instanceof ClientError ? error.message :
@@ -172,15 +194,16 @@ export class InboxWatcher {
     }
   }
 
-  async requestWake(event) {
+  async requestWake(event, runId) {
     try {
       await this.wake(event);
-      if (!this.running) return false;
+      if (this.stale(runId)) return false;
       this.lastWake = new Date().toISOString();
       return true;
     } catch {
-      // The caller owns failure counting (the recovery path already counted this
-      // failure once), so returning false is enough here.
+      // A stale run (stopped, maybe restarted) must not overwrite the live run's
+      // status with this error. The caller owns failure counting.
+      if (this.stale(runId)) return false;
       this.report("error", "AgentTalk could not request a turn; retrying automatically.");
       return false;
     }

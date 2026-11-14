@@ -236,24 +236,28 @@ defmodule AgentTalk.Hub do
     case Map.get(state.waiters, node_id) do
       {_from, ^timer, _args} ->
         # Expire first, as handle_call and :sweep do: a lease that lapsed while
-        # parked must not be revived by the timeout's renewing re-dispatch. Then
-        # persist and announce that expiry like :sweep, so a node that lapsed
-        # while another was parked does not linger in the membership file or the
-        # dashboard until the next call; the wake's own lease renewal stays a
-        # throttled, unannounced presence change.
+        # parked must not be revived by the timeout's renewing re-dispatch.
         now = state.clock.()
         expired = expire_nodes(state, now)
 
+        # On a failed write keep the removal in memory and mark it dirty so the
+        # next presence flush retries the write, rather than committing it with
+        # no later change to trigger a retry.
         flushed =
           case persist(state, expired, now) do
-            {:ok, persisted} ->
-              notify_if_changed(state, persisted)
-              persisted
-
-            {:error, _} ->
-              expired
+            {:ok, persisted} -> persisted
+            {:error, _} -> %{expired | presence_dirty: true}
           end
 
+        # Announce the expiry whenever the in-memory removal took effect, whether
+        # or not the write succeeded: once memory drops the node a later disk-only
+        # retry finds nothing changed and would never announce it. Compare against
+        # the expired state, not the woken one, so a healthy caller's lease
+        # renewal does not broadcast a presence-only change.
+        notify_if_changed(state, flushed)
+
+        # Release the parked caller against the expired state: a node whose own
+        # lease lapsed gets :expired with no renewing re-dispatch.
         {:noreply, wake_waiter(flushed, node_id)}
 
       _ ->
