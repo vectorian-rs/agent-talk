@@ -250,13 +250,13 @@ defmodule AgentTalk.Hub do
             {:noreply, wake_waiter(persisted, node_id)}
 
           {:error, _} ->
-            # The expiry write failed; keep the nodes in memory so the next sweep
-            # retries the save and announce, exactly as :sweep does on a failed
-            # write. Committing the removal here would leave disk and the dashboard
-            # stale with no later change to trigger a retry. The parked caller is
-            # still released; a node whose lease truly lapsed is re-expired on the
-            # next successful sweep.
-            {:noreply, wake_waiter(state, node_id)}
+            # The expiry write failed. Keep the removal in memory and mark the
+            # state dirty so the next presence flush retries the write, instead
+            # of committing the removal with no later change to trigger a retry.
+            # Release the parked caller against the expired state: a node whose
+            # own lease lapsed gets :expired with no renewing re-dispatch, so a
+            # failed write can never revive it past the next sweep.
+            {:noreply, wake_waiter(%{expired | presence_dirty: true}, node_id)}
         end
 
       _ ->

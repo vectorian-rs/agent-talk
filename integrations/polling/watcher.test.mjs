@@ -128,27 +128,31 @@ test("a stopped watcher can be restarted on the same instance with a fresh abort
   watcher.stop();
 });
 
-test("restarting during an in-flight poll starts a fresh check, not the aborted one", async () => {
-  let release;
-  const gate = new Promise((r) => { release = r; });
-  let callCount = 0;
+test("a run stopped during loadMembership issues no request after a restart", async () => {
+  let releaseLoad;
+  const loadGate = new Promise((r) => { releaseLoad = r; });
+  let loadCount = 0, callCount = 0;
   const watcher = new InboxWatcher({
-    loadMembership: async () => ({ node_id: "n-1", token: "test-only", ring_id: "r-1", role: "worker" }),
+    loadMembership: async () => {
+      loadCount++;
+      if (loadCount === 1) await loadGate; // the first run hangs in loadMembership
+      return { node_id: "n-1", token: "test-only", ring_id: "r-1", role: "worker" };
+    },
     client: { call: async (_name, _args, signal) => {
       callCount++;
-      if (callCount === 1) await gate; // the first poll hangs until released
       if (signal?.aborted) throw new ClientError("transport", "aborted");
       return { ring_id: "r-1", inbox: { pending_messages: 0, next_message_id: null } };
     } },
     wake: () => {},
     clearTimer: () => {},
   });
-  watcher.start(); // poll #1 starts and hangs on the gate
-  watcher.stop(); // aborts and abandons poll #1
-  const restart = watcher.start(); // must issue poll #2 now, not reuse poll #1
-  release();
+  watcher.start(); // run #1 hangs in loadMembership
+  watcher.stop(); // stopped before it ever reached the request
+  const restart = watcher.start(); // run #2 loads fresh and issues the one request
+  releaseLoad(); // run #1 resumes; it must bail, not issue a second request
   await restart;
-  assert.ok(callCount >= 2, "the restart issued a fresh list_nodes check");
+  await new Promise((r) => setTimeout(r, 0)); // flush run #1's continuation
+  assert.equal(callCount, 1, "only the restarted run issues a request");
   watcher.stop();
 });
 

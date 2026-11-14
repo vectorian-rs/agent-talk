@@ -529,6 +529,48 @@ defmodule AgentTalk.HubTest do
     refute Map.has_key?(:sys.get_state(hub).nodes, worker.node_id), "expiry must not be undone"
   end
 
+  test "a failed expiry write releases the parked node as expired without reviving it" do
+    dir = Path.join(System.tmp_dir!(), "agent_talk_p2_#{System.unique_integer([:positive])}")
+    File.mkdir_p!(dir)
+    file = Path.join(dir, "memberships.json")
+    on_exit(fn -> File.rm_rf!(dir) end)
+
+    clock = start_supervised!({Agent, fn -> 0 end}, id: :p2_clock)
+
+    hub =
+      start_supervised!(
+        {Hub,
+         name: nil,
+         ttl_ms: 1000,
+         max_inbox: 2,
+         membership_file: file,
+         clock: fn -> Agent.get(clock, & &1) end},
+        id: :p2_hub
+      )
+
+    pm = register(hub, %{role: "pm"})
+    worker = join(hub, pm)
+    parked = Task.async(fn -> Hub.list_nodes(auth(worker, %{wait_seconds: 10}), hub) end)
+    await_waiter(hub, worker.node_id)
+    {_from, timer, _args} = :sys.get_state(hub).waiters[worker.node_id]
+
+    # The worker's lease lapses while parked, and the membership store can no
+    # longer be written: its path is now a directory, so every save fails.
+    Agent.update(clock, fn _ -> 1001 end)
+    File.rm!(file)
+    File.mkdir!(file)
+
+    send(hub, {:timeout, timer, {:waiter_timeout, worker.node_id}})
+
+    # Even though the write failed, the expired caller is released as expired and
+    # not revived with a renewed lease that would survive the next sweep.
+    assert {:error, :expired, _} = Task.await(parked, 1000)
+    {:ok, %{nodes: nodes}} = Hub.snapshot(hub)
+
+    refute Enum.any?(nodes, &(&1.node_id == worker.node_id)),
+           "a failed write must not revive the lease"
+  end
+
   test "a long-poll wake does not revert a label changed during the wait", %{hub: hub, pm: pm} do
     worker = join(hub, pm)
 

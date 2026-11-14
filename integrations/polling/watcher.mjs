@@ -78,7 +78,7 @@ export class InboxWatcher {
     if (this.inFlight) return this.inFlight;
     this.clearTimer(this.timer);
     const runId = this.runId;
-    this.inFlight = this.poll().finally(() => {
+    this.inFlight = this.poll(runId).finally(() => {
       // A stop() since this poll began bumped runId; its continuation must not
       // clear a newer run's in-flight handle or schedule a stale retry.
       if (runId !== this.runId) return;
@@ -98,12 +98,19 @@ export class InboxWatcher {
     return this.inFlight;
   }
 
-  async poll() {
+  // A stop() bumps runId; a run must bail after every async step if it was
+  // stopped (and possibly restarted) meanwhile, or it would issue a second
+  // request on the restart's controller.
+  stale(runId) {
+    return !this.running || runId !== this.runId;
+  }
+
+  async poll(runId) {
     try {
       this.waitingForMembership = false;
       this.immediate = false;
       const member = await this.loadMembership();
-      if (!this.running) return;
+      if (this.stale(runId)) return;
       if (!member) {
         this.waitingForMembership = true;
         this.report("waiting", "AgentTalk waiting for this session's saved registration.");
@@ -133,7 +140,7 @@ export class InboxWatcher {
         { ...labels, node_id: member.node_id, token: member.token,
           wait_seconds: WATCH_WAIT_SECONDS },
         this.controller.signal);
-      if (!this.running) return;
+      if (this.stale(runId)) return;
       const inbox = validateInboxMetadata(result, member.ring_id,
         "Update AgentTalk: list_nodes must return inbox metadata.");
       this.lastCheck = new Date().toISOString();
@@ -154,7 +161,7 @@ export class InboxWatcher {
         this.notified = true;
         this.attempts++;
         const sent = await this.requestWake({ kind: "inbox", node_id: member.node_id, role: member.role,
-          ring_id: member.ring_id, pending_messages: inbox.pending_messages });
+          ring_id: member.ring_id, pending_messages: inbox.pending_messages }, runId);
         if (!sent) {
           this.notified = false;
           this.attempts = Math.max(0, this.attempts - 1);
@@ -167,13 +174,13 @@ export class InboxWatcher {
       }
       this.failures = 0;
     } catch (error) {
-      if (!this.running) return;
+      if (this.stale(runId)) return;
       this.failures++;
       if (["expired", "token"].includes(error.code)) {
         this.report("registration", error.message);
         if (!this.paused && !this.authNotified) {
           this.authNotified = true;
-          if (!await this.requestWake({ kind: "recovery" })) this.authNotified = false;
+          if (!await this.requestWake({ kind: "recovery" }, runId)) this.authNotified = false;
         }
       } else {
         this.report("error", error instanceof ClientError ? error.message :
@@ -182,10 +189,10 @@ export class InboxWatcher {
     }
   }
 
-  async requestWake(event) {
+  async requestWake(event, runId) {
     try {
       await this.wake(event);
-      if (!this.running) return false;
+      if (this.stale(runId)) return false;
       this.lastWake = new Date().toISOString();
       return true;
     } catch {
