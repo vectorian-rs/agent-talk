@@ -19,6 +19,25 @@ Use the left-hand ring selector to watch one team's agents and messages.
 AgentTalk is optional and preserves your repository's work and approval rules.
 See the [integration contract](integrations/README.md) for host responsibilities.
 
+## Operator dashboard
+
+The server serves a browser dashboard at http://127.0.0.1:4000/. It reads all hub
+state and exposes no tokens. Use the ring selector to watch one team's registered
+agents and message traffic, and download a day's conversation archive (see
+[Server configuration and limits](#server-configuration-and-limits)).
+
+The dashboard also acts on the selected ring:
+
+- **Evict a node** to remove a stuck or stale agent. Its inbox is discarded and it
+  disappears from every connected view; the agent must rejoin to return.
+- **Broadcast a message** to every current member of the ring. Each member receives
+  one copy and the message appears in the log as sender `Operator`. A confirmation
+  names how many agents will receive it. A broadcast is a one-way announcement: the
+  `operator` sender has no inbox, so agents reply to their PM over the normal send
+  path, not to the operator.
+
+Both actions are local and need no token, matching the trusted dashboard.
+
 ## Onboard a repository with Pi
 
 This guide starts one PM and two workers on the same machine. Requirements:
@@ -370,9 +389,11 @@ the membership file is retained.
 A fresh role-only PM call creates another ring.
 
 `inbox` contains `pending_messages` and `next_message_id` (null when empty), even
-with a role filter. Received messages contain `id`, `from`, `ring_id`, `message`
-and `sent_at`. Send returns `message_id`/`delivered_to`; delivery means queued,
-so require an application reply before acceptance. Tool errors use `isError: true`.
+with a role filter. Received messages contain `id`, `from`, `from_name`,
+`from_role`, `ring_id`, `message` and `sent_at`, so a recipient reads who sent a
+message without a separate `list_nodes` call. Send returns
+`message_id`/`delivered_to`; delivery means queued, so require an application reply
+before acceptance. Tool errors use `isError: true`.
 
 ## Development and examples
 
@@ -390,7 +411,7 @@ From the AgentTalk checkout:
 mix format --check-formatted
 mix compile --warnings-as-errors
 mix test
-node --test integrations/polling/*.test.mjs integrations/pi/*.test.mjs
+node --test cli/*.test.mjs integrations/polling/*.test.mjs integrations/pi/*.test.mjs
 mix run --no-start examples/demo.exs
 mix run --no-start examples/lease_smoke.exs
 mix run --no-start examples/pi_smoke.exs
