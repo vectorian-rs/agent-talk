@@ -162,6 +162,9 @@ export class InboxWatcher {
         this.attempts++;
         const sent = await this.requestWake({ kind: "inbox", node_id: member.node_id, role: member.role,
           ring_id: member.ring_id, pending_messages: inbox.pending_messages }, runId);
+        // A stop() during the wake must not let this run clear the restarted
+        // run's notified flag, which would let it wake a second time.
+        if (this.stale(runId)) return;
         if (!sent) {
           this.notified = false;
           this.attempts = Math.max(0, this.attempts - 1);
@@ -180,7 +183,9 @@ export class InboxWatcher {
         this.report("registration", error.message);
         if (!this.paused && !this.authNotified) {
           this.authNotified = true;
-          if (!await this.requestWake({ kind: "recovery" }, runId)) this.authNotified = false;
+          const woke = await this.requestWake({ kind: "recovery" }, runId);
+          if (this.stale(runId)) return;
+          if (!woke) this.authNotified = false;
         }
       } else {
         this.report("error", error instanceof ClientError ? error.message :

@@ -529,12 +529,13 @@ defmodule AgentTalk.HubTest do
     refute Map.has_key?(:sys.get_state(hub).nodes, worker.node_id), "expiry must not be undone"
   end
 
-  test "a failed expiry write releases the parked node as expired without reviving it" do
+  test "a failed expiry write releases the parked node as expired, announces it, and does not revive it" do
     dir = Path.join(System.tmp_dir!(), "agent_talk_p2_#{System.unique_integer([:positive])}")
     File.mkdir_p!(dir)
     file = Path.join(dir, "memberships.json")
     on_exit(fn -> File.rm_rf!(dir) end)
 
+    start_supervised!({Phoenix.PubSub, name: AgentTalk.P2PubSub}, id: :p2_pubsub)
     clock = start_supervised!({Agent, fn -> 0 end}, id: :p2_clock)
 
     hub =
@@ -544,6 +545,7 @@ defmodule AgentTalk.HubTest do
          ttl_ms: 1000,
          max_inbox: 2,
          membership_file: file,
+         pubsub: AgentTalk.P2PubSub,
          clock: fn -> Agent.get(clock, & &1) end},
         id: :p2_hub
       )
@@ -554,6 +556,9 @@ defmodule AgentTalk.HubTest do
     await_waiter(hub, worker.node_id)
     {_from, timer, _args} = :sys.get_state(hub).waiters[worker.node_id]
 
+    # Subscribe after setup so only the expiry broadcast reaches this process.
+    Phoenix.PubSub.subscribe(AgentTalk.P2PubSub, Hub.topic())
+
     # The worker's lease lapses while parked, and the membership store can no
     # longer be written: its path is now a directory, so every save fails.
     Agent.update(clock, fn _ -> 1001 end)
@@ -563,8 +568,9 @@ defmodule AgentTalk.HubTest do
     send(hub, {:timeout, timer, {:waiter_timeout, worker.node_id}})
 
     # Even though the write failed, the expired caller is released as expired and
-    # not revived with a renewed lease that would survive the next sweep.
+    # not revived, and the expiry is announced so the dashboard does not go stale.
     assert {:error, :expired, _} = Task.await(parked, 1000)
+    assert_receive :hub_updated
     {:ok, %{nodes: nodes}} = Hub.snapshot(hub)
 
     refute Enum.any?(nodes, &(&1.node_id == worker.node_id)),

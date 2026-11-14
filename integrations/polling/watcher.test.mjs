@@ -156,6 +156,31 @@ test("a run stopped during loadMembership issues no request after a restart", as
   watcher.stop();
 });
 
+test("a wake resolving after a stop does not clear a restarted run's notified flag", async () => {
+  let releaseWake;
+  const wakeGate = new Promise((r) => { releaseWake = r; });
+  let wakeCount = 0;
+  const watcher = new InboxWatcher({
+    loadMembership: async () => ({ node_id: "n-1", token: "test-only", ring_id: "r-1", role: "worker" }),
+    client: { call: async () => ({ ring_id: "r-1", inbox: { pending_messages: 1, next_message_id: "m-1" } }) },
+    wake: async () => { wakeCount++; if (wakeCount === 1) await wakeGate; }, // the first wake hangs
+    setTimer: () => 0, // no real reschedule during the test
+    clearTimer: () => {},
+  });
+  watcher.start(); // run #1: pending mail sets notified and starts wake #1, which hangs
+  await new Promise((r) => setTimeout(r, 0));
+  assert.equal(watcher.notified, true);
+  watcher.stop();
+  await watcher.start(); // run #2 sees notified still set and does not wake again
+  releaseWake(); // the stale wake #1 now resolves
+  await new Promise((r) => setTimeout(r, 0));
+  // A fresh check must not wake again: a stale run that cleared notified would
+  // have let it. (Without the fix, poll's !sent branch clears it.)
+  await watcher.check();
+  assert.equal(wakeCount, 1, "a stale run clearing notified causes a duplicate wake");
+  watcher.stop();
+});
+
 test("an empty held reply resumes the watch immediately; anything else keeps pacing", async () => {
   const f = fixture();
   f.state.waited = 25;
