@@ -97,12 +97,35 @@ test("unread mail has bounded model retries; a new head message resets the budge
   f.watcher.stop();
 });
 
-test("checks ask the server to hold the reply and extend the HTTP timeout to match", async () => {
+test("checks ask the server to hold the reply; the client derives the matching HTTP timeout", async () => {
   const f = fixture();
   await f.watcher.start();
   assert.equal(f.calls[0].args.wait_seconds, 25);
-  assert.equal(f.calls[0].timeoutMs, 30_000);
+  // The watcher passes no explicit timeout; McpClient.call derives it from
+  // wait_seconds via httpTimeout (covered in mcp.test.mjs).
+  assert.equal(f.calls[0].timeoutMs, undefined);
   f.watcher.stop();
+});
+
+test("a stopped watcher can be restarted on the same instance with a fresh abort signal", async () => {
+  const calls = [];
+  const watcher = new InboxWatcher({
+    loadMembership: async () => ({ node_id: "n-1", token: "test-only", ring_id: "r-1", role: "worker" }),
+    // Mirror McpClient: a request on an already-aborted signal fails at once.
+    client: { call: async (_name, _args, signal) => {
+      if (signal?.aborted) throw new ClientError("transport", "aborted");
+      calls.push(signal);
+      return { ring_id: "r-1", inbox: { pending_messages: 0, next_message_id: null } };
+    } },
+    wake: () => {},
+    clearTimer: () => {},
+  });
+  await watcher.start();
+  watcher.stop(); // aborts the controller
+  await watcher.start(); // must install a fresh controller, or the next call aborts
+  assert.equal(calls.length, 2, "the restarted check runs on a non-aborted signal");
+  assert.equal(calls[1]?.aborted, false);
+  watcher.stop();
 });
 
 test("an empty held reply resumes the watch immediately; anything else keeps pacing", async () => {

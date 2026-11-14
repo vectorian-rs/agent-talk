@@ -222,6 +222,18 @@ defmodule AgentTalk.OperatorLiveTest do
     refute render(view) =~ "draft for ring A"
   end
 
+  test "re-selecting the current ring keeps an in-progress broadcast draft" do
+    pm = register(%{role: "pm", project: "hiko", name: "hiko / pm"})
+    {:ok, view, _} = live(build_conn(), "/")
+
+    view |> form("#operator-broadcast", %{message: "half-typed broadcast"}) |> render_change()
+    assert render(view) =~ "half-typed broadcast"
+
+    # Re-clicking the already-selected ring chip is not a change; the draft stays.
+    view |> element("#ring-select .ring-chip[phx-value-ring='#{pm.ring_id}']") |> render_click()
+    assert render(view) =~ "half-typed broadcast"
+  end
+
   defp reset_hub do
     :ok = Supervisor.terminate_child(AgentTalk.Supervisor, Hub)
     {:ok, _} = Supervisor.restart_child(AgentTalk.Supervisor, Hub)

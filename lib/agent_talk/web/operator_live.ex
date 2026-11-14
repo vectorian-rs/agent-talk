@@ -29,7 +29,10 @@ defmodule AgentTalk.Web.OperatorLive do
   end
 
   def handle_event("select_ring", %{"ring" => ring}, socket) do
-    if Enum.any?(socket.assigns.rings, &(&1.id == ring)) do
+    # Only a real change resets filters and the draft. Re-clicking the current
+    # ring chip is not a change, so it must not wipe an in-progress broadcast
+    # draft (the chips render as aria-pressed toggles, so a re-click is natural).
+    if ring != socket.assigns.ring and Enum.any?(socket.assigns.rings, &(&1.id == ring)) do
       {:noreply,
        socket |> assign(ring: ring, party: "all", query: "", compose: "") |> scope_ring()}
     else

@@ -117,14 +117,12 @@ defmodule AgentTalk.History do
 
   def record(nil, _request, _reply, _state, _at), do: :ok
 
-  def record(db, {:communicate, %{action: "send"}}, {:ok, %{message_id: id}}, state, _at),
-    do: archive_event(db, id, state)
-
-  # An operator broadcast archives exactly like a send: the delivered event sits
-  # in state.messages and the reply carries its id. Without this clause the row
-  # is never written, and a recipient's later receive finds no archived message,
-  # fails its collected_json lookup, and the whole receive is rolled back.
-  def record(db, {:broadcast, _ring_id, _message}, {:ok, %{message_id: id}}, state, _at),
+  # Any successful emit returns the new message_id, so key archival on that reply
+  # shape rather than the request verb: an agent send and an operator broadcast
+  # both mint their id at the single Hub.emit_event/5 site and archive here with
+  # no per-producer clause. Without the row a recipient's later receive finds no
+  # archived message, fails its collected_json lookup, and rolls the receive back.
+  def record(db, _request, {:ok, %{message_id: id}}, state, _at),
     do: archive_event(db, id, state)
 
   def record(
@@ -222,10 +220,8 @@ defmodule AgentTalk.History do
           "Ring: #{event.ring_id}\nProject: #{event.project || "unspecified"}\nSent: #{event.sent_at}\nFrom: #{event.from_name} (#{event.from})\nTo: #{recipients}#{reply}\n\n#{event.message}\n\nCollection:\n#{collected}"
 
         fence_size =
-          Regex.scan(~r/`+/, text)
-          |> Enum.map(fn [run] -> byte_size(run) + 1 end)
-          |> Enum.max(fn -> 3 end)
-          |> max(3)
+          [3 | Enum.map(Regex.scan(~r/`+/, text), fn [run] -> byte_size(run) + 1 end)]
+          |> Enum.max()
 
         fence = String.duplicate("`", fence_size)
         "## #{event.id}\n\n#{fence}text\n#{text}\n#{fence}\n\n"
