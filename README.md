@@ -52,8 +52,16 @@ Keep AgentTalk in its own checkout:
 git clone https://github.com/vectorian-rs/agent-talk.git /path/to/agent-talk
 cd /path/to/agent-talk
 mix deps.get
+sh scripts/patch-anubis-sse.sh
+mix deps.compile anubis_mcp
 mix run --no-halt -- --config config/dev.toml
 ```
+
+The local Anubis MCP 2.2.0 patch ignores socket `:read_timeout` messages in
+its SSE loop without hiding other warnings. Reapply it after dependency installs
+and compile Anubis in each environment used (for tests, run
+`MIX_ENV=test mix deps.compile anubis_mcp`). The script is safe to repeat and
+fails if the dependency no longer matches. Restart a running server to load it.
 
 Skip cloning if already installed. Leave the server running; every agent must
 connect to it. Open **http://127.0.0.1:4000/** for the operator UI.

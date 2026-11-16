@@ -1,0 +1,16 @@
+diff --git a/lib/anubis/sse/streaming.ex b/lib/anubis/sse/streaming.ex
+--- a/lib/anubis/sse/streaming.ex
++++ b/lib/anubis/sse/streaming.ex
+@@ -160,6 +160,12 @@
+       loop(conn, idle_timeout, session_id, event_counter, last_id)
+     end
+ 
++    defp handle_message(:read_timeout, conn, idle_timeout, session_id, event_counter, last_id) do
++      # Bandit's idle read timer can fire while this process owns the SSE loop.
++      # SSE writes detect disconnects; there is no request body left to read.
++      loop(conn, idle_timeout, session_id, event_counter, last_id)
++    end
++
+     defp handle_message(msg, conn, idle_timeout, session_id, event_counter, last_id) do
+       Logging.transport_event("sse_unknown_message", %{session_id: session_id, message: inspect(msg)}, level: :warning)
+       loop(conn, idle_timeout, session_id, event_counter, last_id)
