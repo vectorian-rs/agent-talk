@@ -39,65 +39,39 @@ The dashboard also acts on the selected ring:
 
 Both actions are local and need no token, matching the trusted dashboard.
 
-## Add an agent with the CLI
+## Add an agent to an existing ring
 
-The CLI registers or resumes one named session at a time. It supports Pi and
-Claude Code in the same ring; repository instructions still own project work.
-Node 24+ and the selected client must be installed.
-
-Install the command from this checkout once:
+With Node 24+ installed, run this from your project root:
 
 ```sh
-cd /path/to/agent-talk/cli
-npm ci --ignore-scripts
-npm link --ignore-scripts
+node /path/to/agent-talk/cli/agent-talk.mjs add cc-w5 --team manual-4 --client claude
 ```
 
-For a new project, run `agent-talk init --client pi --workers 4` from its root,
-then start the PM with `agent-talk start pm`. Init prints each launch command.
-To adopt an existing manually launched team instead, select its directory:
+The CLI uses exactly `.agent-talk/manual-4/`. It saves the new worker's private
+membership and Claude connection files there, then prints a native `claude …`
+command. Run that command in its own terminal. It does not launch Claude for you.
+Use `--client pi` for a Pi worker. Repeat with another unused label to add another
+agent. There is no configured team size and no `agent-talk.toml` requirement.
 
-```sh
-cd /path/to/your-repo
-agent-talk init --client pi --workers 4 --team manual-4
-```
+The selected folder must already contain `invitation.json` or a saved `pm.json`.
+If only `pm.json` exists, the CLI authenticates it before copying the shared ring
+invitation and public IDs into `invitation.json`, never its private node token.
+An empty or missing folder is an error, not a request to create a new ring.
+The default server is `http://127.0.0.1:4000/mcp`; use `--server URL` explicitly
+for another server. Existing labels are rejected rather than taken over.
 
-This uses `.agent-talk/manual-4/`, not a new ring. The team must have a saved
-`pm.json` or CLI `invitation.json`. When adopting `pm.json`, the CLI verifies it
-with the server and copies only the ring invitation and public IDs. An expired
-PM must be resumed first. Init never registers anything and refuses to replace
-an existing config with conflicting options. Do not start a second PM if yours
-is already running.
+Claude's MCP config, hook settings and transport instructions are saved beside
+its membership. Approve the MCP connection and tools when Claude asks. Existing
+project instructions and shared Claude settings are not replaced.
 
-Add one more worker, then launch it in its own terminal:
+**Claude hooks do not wake an idle session.** They report pending mail at startup
+and prompt submission. Prompt an idle worker to check its inbox when needed.
+Pi retains its background watcher. Run each printed command only once; native
+client sessions do not have CLI ownership tracking.
 
-```sh
-agent-talk add cc-w5 --client claude
-agent-talk start cc-w5
-```
-
-Repeat with `cc-w6`, `cc-w7`, or any unused worker label. For another worker of
-the project's default client, `agent-talk add reviewer` is enough. Add only
-updates configuration; start registers or renews the worker in the existing
-ring. Neither action creates a replacement ring. Repeating add with the same
-client is safe; changing an existing label's client is rejected.
-
-Additional clients are stored in `agent-talk.toml`. Private registrations remain
-in `.agent-talk/<team>/<label>.json`. Claude's MCP config, settings and transport
-instructions are generated beside its membership in `<label>.json.claude/`.
-No manual invitation copying or pasted onboarding prompt is needed. The
-launcher does not replace shared Claude settings or repository instructions.
-Approve the MCP connection and tool permissions when Claude asks.
-
-Claude checks its inbox during onboarding and when a hook reports pending mail.
-**An idle Claude session is not awakened automatically.** Prompt it to check its
-inbox when needed. Pi retains its background watcher. Session locks prevent two
-CLI launches using the same membership; they cannot detect manually launched
-clients. If a launcher is killed abruptly, confirm its old client is stopped
-before removing the reported `.session.lock` file.
-
-See [CLI details](docs/cli-draft.md) for configuration and recovery. The manual
-Pi onboarding below remains available without the CLI.
+See [CLI details](docs/cli-draft.md) for the files and recovery steps. The older
+`init/start` commands remain available for existing TOML-based projects; they
+are not needed to add a worker to an existing ring.
 
 ## Onboard a repository with Pi
 

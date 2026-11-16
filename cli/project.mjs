@@ -4,9 +4,8 @@ import { randomBytes } from "node:crypto";
 import { parse, stringify } from "smol-toml";
 import { ClientError, McpClient, readMembership, validateInboxMetadata, validateServerUrl } from "../integrations/polling/mcp.mjs";
 
-const keys = ["server", "client", "project", "team", "workers", "agents"];
+const keys = ["server", "client", "project", "team", "workers"];
 const clients = ["pi", "claude"];
-const validLabel = (label) => typeof label === "string" && /^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$/.test(label);
 const error = (message) => new ClientError("configuration", message);
 
 export function validate(config) {
@@ -24,18 +23,7 @@ export function validate(config) {
   if (!Number.isInteger(config.workers) || config.workers < 1 || config.workers > 4) {
     throw error("workers must be 1..4.");
   }
-  if (config.agents !== undefined) {
-    if (!config.agents || typeof config.agents !== "object" || Array.isArray(config.agents)) throw error("agents must be a table of named clients.");
-    for (const [label, agent] of Object.entries(config.agents)) {
-      if (!validLabel(label) || ["pm", "invitation"].includes(label) || !agent || typeof agent !== "object" ||
-          Object.keys(agent).some((key) => key !== "client") || !clients.includes(agent.client)) {
-        throw error("Each additional agent needs a safe worker label and client = pi or claude.");
-      }
-    }
-  }
-  return { ...config, ...(config.agents === undefined ? {} : {
-    agents: Object.fromEntries(Object.entries(config.agents).map(([label, agent]) => [label, { client: agent.client }])),
-  }) };
+  return { ...config };
 }
 
 export async function loadProject(root) {
@@ -111,8 +99,7 @@ export async function initProject(root, options = {}) {
 
 export const stateDir = (root, config) => join(root, ".agent-talk", config.team);
 export const memberFile = (root, config, label) => join(stateDir(root, config), label + ".json");
-export const labels = (config) => [...new Set(["pm", ...Array.from({ length: config.workers }, (_, n) => "w-" + (n + 1)), ...Object.keys(config.agents ?? {})])];
-export const agentClient = (config, label) => config.agents?.[label]?.client ?? config.client;
+export const labels = (config) => config.label ? ["pm", config.label] : ["pm", ...Array.from({ length: config.workers }, (_, n) => "w-" + (n + 1))];
 
 // Import only the invitation from a manually launched PM. Authenticate it first;
 // never create a replacement ring when adopting an existing team.
@@ -136,34 +123,6 @@ export async function teamInvitation(root, config, client) {
     throw error("Invalid team invitation; resume the PM first.");
   }
   return invitation;
-}
-
-export async function addAgent(root, label, options, client) {
-  if (!validLabel(label) || ["pm", "invitation"].includes(label)) throw error("Choose a worker label with 1..64 letters, digits, underscores or hyphens; pm and invitation are reserved.");
-  if (options.client !== undefined && !clients.includes(options.client)) throw error("Choose --client pi or --client claude.");
-  // Exclusive configuration ownership prevents two additions losing each other.
-  await mkdir(join(root, ".agent-talk"), { recursive: true, mode: 0o700 });
-  const lock = join(root, ".agent-talk", "add.lock");
-  let handle;
-  try { handle = await open(lock, "wx", 0o600); }
-  catch { throw error("Another add is in progress. If it exited, remove .agent-talk/add.lock and retry."); }
-  try {
-    const config = await loadProject(root);
-    const kind = options.client ?? agentClient(config, label);
-    if (labels(config).includes(label)) {
-      if (agentClient(config, label) !== kind) throw error("That agent already uses a different client; choose a new label.");
-      return config;
-    }
-    const updated = validate({ ...config, agents: { ...config.agents, [label]: { client: kind } } });
-    await prepare(root, updated, kind);
-    await teamInvitation(root, config, client);
-    const temporary = join(root, ".agent-talk-config-" + randomBytes(12).toString("hex") + ".tmp");
-    try {
-      await writeFile(temporary, stringify(updated), { flag: "wx", mode: 0o600 });
-      await rename(temporary, join(root, "agent-talk.toml"));
-    } finally { await rm(temporary, { force: true }); }
-    return updated;
-  } finally { await handle.close(); await rm(lock, { force: true }); }
 }
 
 export async function connect(server) {
@@ -199,7 +158,7 @@ export async function inboxServer(root, options) {
 
 export async function provision(root, config, label, client) {
   if (!labels(config).includes(label)) throw error("Choose pm or a configured worker label.");
-  await prepare(root, config, agentClient(config, label));
+  await prepare(root, config);
   const role = label === "pm" ? "pm" : "worker", file = memberFile(root, config, label);
   const invitation = role === "worker" ? await teamInvitation(root, config, client) : undefined;
   const saved = await readMembership(file);
