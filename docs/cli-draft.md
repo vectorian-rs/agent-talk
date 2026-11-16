@@ -1,81 +1,153 @@
-# CLI draft
+# CLI onboarding
 
-Branch: `fix/cli-transport-only`. The separate worktree contains this revision; the
-running checkout and server remain unchanged. This is an initial prototype,
-not the supported onboarding path yet.
+The CLI starts only the named session. Pi and Claude Code can share one ring.
+Project instructions, assignments and approval gates remain owned by the
+repository and client, not by the launcher.
 
-## Scope and decisions
+## Install
 
-- The human starts each session. The CLI starts only its named client process.
-- `agent-talk.toml` is shared project configuration; no environment overrides.
-- The CLI configures transport only. It does not require instruction files,
-  discover an agent framework, supply a model prompt, or define project workflow.
-  The user's existing client configuration owns project instructions.
-- `init` creates private directories, adds the ignore rule, configures Pi's MCP
-  connection without removing other servers, and prints complete launch commands.
-- `start pm` registers/resumes the PM and privately saves its invitation.
-  `start w-N` joins that team; no copied invitation or credential-bearing prompt.
-- Registration is saved atomically before client launch. Invalid private tokens
-  fail; expiry rejoins with the existing invitation. A failed join never creates
-  a replacement PM ring silently.
-- Existing MCP tools and the Pi inbox watcher are reused. Only Pi launch is
-  implemented initially. Other hosts need their own tested scheduling adapter.
-- The Node CLI shares the existing Node integration runtime. Its one dependency
-  is the [smol-toml parser](https://github.com/squirrelchat/smol-toml), pinned by
-  the lockfile. No custom TOML parser or extra Elixir server process is involved.
-
-## Draft usage
-
-Install dependencies inside this worktree once:
+Node 24+ is required. From the AgentTalk checkout:
 
 ```sh
-cd /Users/l1x/code/home/agent-talk-cli/cli
+cd cli
 npm ci --ignore-scripts
+npm link --ignore-scripts
 ```
 
-From a disposable project:
+Without linking, replace `agent-talk` with
+`node /absolute/path/to/agent-talk/cli/agent-talk.mjs`.
+
+## Three commands
+
+Run these from the project root:
 
 ```sh
-node /Users/l1x/code/home/agent-talk-cli/cli/agent-talk.mjs init --client pi --workers 4
+agent-talk init --client pi --workers 4
+agent-talk start pm
 ```
 
-`init` prints five complete commands, including the working directory and
-executable path. Start PM first, then each worker in its own terminal. The launcher
-supplies the transport extension and membership paths. Pi opens normally so the
-user can apply their own project setup and instructions.
-Packaging a standalone `agent-talk` executable remains a follow-up.
+Init writes `agent-talk.toml`, prepares private state, and prints full launch
+commands. It does not register agents. Start the PM before workers, in its own
+terminal. A new PM creates the ring; subsequent starts renew its identity or
+rejoin its saved ring after expiry.
 
-The config contains `server`, `client`, `project`, `team` and `workers`.
-State lives under `.agent-talk/<team>/`. Choose a new team
-name explicitly for an independent ring. Secrets never enter launch arguments.
+To add a worker to that ring:
 
-## Acceptance and verification
+```sh
+agent-talk add cc-w5 --client claude
+agent-talk start cc-w5
+```
 
-- Init is repeatable and preserves other MCP servers and ignore entries.
-- PM and four workers get distinct, private memberships in one ring.
-- Workers need that team's invitation; mismatched roles/rings and bad tokens fail.
-- Launch arguments contain transport configuration, never bearer credentials or
-  project instructions. Empty projects need no particular instruction entry point.
-- Existing Pi polling tests remain green after MCP client reuse.
-- All tests use disposable directories and fake/isolated servers. Never run this
-  draft against the current CeleraTax or Hiko team during development.
+Add configures one additional worker and prints its launch command. Start
+registers or resumes it, saves the complete response privately, and launches
+only its selected client. Labels are independent of the role: every additional
+agent is a worker. There is no four-worker ceiling on additions. Labels contain
+1..64 letters, digits, underscores or hyphens, starting with a letter or digit;
+`pm` and `invitation` are reserved.
 
-The initial draft passed 57 Elixir tests and 37 Node tests. Self-review found
-and fixed an expired PM registration without an
-invitation accidentally falling through to a fresh ring; a regression now guards
-that boundary. The running checkout's source fingerprint and listening server PID
-were unchanged throughout this draft.
+Omit `--client` to use the project default for a new label. Repeating add for an
+existing label uses its current client unless explicitly specified. A different
+client for an existing label is rejected rather than silently replacing it.
 
-The transport-only revision passes 38 Node tests and the real-Pi regression
-covering registration, inbox wake-ups, cancellation, reload and server restart.
-It also tests a project with no instruction files and checks that launch arguments
-contain no startup prompt. The former role-file settings are removed; an existing
-config using those keys must remove them before adopting this revision.
+Add never launches a session or creates a ring. An existing PM invitation is
+required. Start workers in separate terminals. Never give two live sessions
+the same identity. Use separate approved branches/worktrees for concurrent
+coding; the CLI does not manage project branches.
 
-Before this becomes the default: add exclusive session ownership and stale-lock
-recovery, process/signal tests, actual CLI-to-Pi smoke coverage, `status` with
-separate registration/polling/round-trip evidence, and packaging. The existing
-in-memory message delivery limits remain unchanged.
+## Adopt a manually launched ring
+
+For a team already using `.agent-talk/manual-4/pm.json`:
+
+```sh
+agent-talk init --client pi --workers 4 --team manual-4
+agent-talk add cc-w5 --client claude
+agent-talk start cc-w5
+```
+
+Do not start another PM if the existing one is running. The first addition
+or worker start reads the saved PM, authenticates it with `list_nodes`, checks
+its ring and PM identity, and saves `invitation.json` containing only `ring_id`,
+`ring_token` and `pm_id`. The PM's private node token is never copied.
+
+If `invitation.json` already exists, it is used as-is. Invalid, corrupt or
+expired state fails instead of creating or selecting a replacement ring.
+Resume an expired PM using its existing client before importing its invitation.
+An existing `agent-talk.toml` is never silently switched to another team;
+conflicting init options fail. Edit the configuration explicitly if needed.
+
+## Configuration and private files
+
+Example mixed-client configuration:
+
+```toml
+server = "http://127.0.0.1:4000/mcp"
+client = "pi"
+project = "celeratax"
+team = "manual-4"
+workers = 4
+
+[agents.cc-w5]
+client = "claude"
+```
+
+`workers` is the initial `w-1` through `w-N` roster (1..4), not a total ring
+limit. Additional labels are recorded in `agents`. Add preserves configuration
+values, reserializing TOML, so comments and formatting may change. Configuration
+updates are atomic and concurrent additions are excluded with a private lock.
+If an add process is killed abruptly, confirm it has stopped before removing
+`.agent-talk/add.lock` and retrying.
+
+Each membership is `.agent-talk/<team>/<label>.json`, written atomically with
+mode 0600. The team directory is private and ignored by Git. Existing membership
+files are never cloned into new workers. Authentication errors do not silently
+fall back to a fresh identity. Only expiry rejoins the saved ring; after a
+changed identity, reconcile work and notify peers.
+
+Pi receives its existing transport extension and membership flags. Its shared
+`.pi/mcp.json` connection is merged without removing other servers. Claude
+launches do not modify `.pi/mcp.json` or shared `.claude` settings.
+
+For Claude, the launcher generates these session-local files:
+
+```text
+.agent-talk/<team>/<label>.json.claude/
+  mcp.json        MCP connection, passed with --mcp-config
+  settings.json   Inbox hooks, passed with --settings
+  transport.json Membership path, logical label, PM ID and transport instructions
+```
+
+These binding files contain no bearer credentials. Credentials stay only in
+the membership and invitation files. The session receives a reference to its
+transport instructions, not a replacement project system prompt or workflow.
+It verifies the ring and PM using `list_nodes` and sends its joined message.
+Approve the MCP connection and required tool permissions in Claude Code.
+
+## Inbox checks and limitations
+
+Claude's `SessionStart` and `UserPromptSubmit` hooks invoke:
+
+```sh
+agent-talk inbox /absolute/path/to/membership.json --server http://127.0.0.1:4000/mcp
+```
+
+Inbox checks authenticate, renew the lease and report the pending count without
+receiving. The model uses the MCP `communicate` tool to receive and process mail.
+Hooks do not log tokens, drain messages, repeatedly prompt the model, or wake an
+idle Claude session. Ask an idle worker to check its inbox when needed. Pi's
+background watcher remains unchanged. Automatic Claude idle delivery is not
+implemented.
+
+Start holds a per-membership `.session.lock` until its client exits, including
+on launch failure or forwarded SIGINT/SIGTERM. A duplicate CLI launch fails
+before contacting the broker. Manually launched clients do not participate in
+this lock, and abrupt kills can leave stale locks. Stop the old client before
+removing a reported lock. The CLI never automatically steals an identity.
+
+All CLI tests use temporary projects and fake brokers/clients. They must not
+join or mutate live CeleraTax rings during development. Fake-client launch tests
+cover file binding, hook execution, renewal, duplicate ownership, signal
+forwarding and missing executables. A live model's willingness and permissions
+to follow onboarding instructions still need operator confirmation.
 
 ## Message presentation
 

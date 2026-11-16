@@ -1,16 +1,15 @@
 #!/usr/bin/env node
 import { parseArgs } from "node:util";
-import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
-import { initProject, loadProject, connect, provision, inbox, inboxServer, labels } from "./project.mjs";
-import { piArguments } from "./pi.mjs";
+import { initProject, loadProject, connect, inbox, inboxServer, labels, addAgent } from "./project.mjs";
+import { startAgent } from "./session.mjs";
 import { ClientError, McpClient } from "../integrations/polling/mcp.mjs";
 
-const help = "Draft: agent-talk init [--client pi] [--workers 4]\n       agent-talk start pm|w-1|w-2|w-3|w-4\n       agent-talk inbox <membership.json> [--server URL]\nRun from your project root. Only the requested session is launched. Project instructions are owned by your client setup.";
+const help = "Draft: agent-talk init [--client pi|claude] [--workers 4] [--team NAME]\n       agent-talk add <label> [--client pi|claude]\n       agent-talk start <label>\n       agent-talk inbox <membership.json> [--server URL]\nRun from your project root. Add configures a worker in the existing team, never creates a ring. Only start launches a session. Project instructions remain owned by your client setup.";
 const quote = (value) => "'" + value.replaceAll("'", "'\\''") + "'";
 try {
   const { values, positionals } = parseArgs({ allowPositionals: true, strict: true, options: {
-    client: { type: "string" }, workers: { type: "string" }, server: { type: "string" },
+    client: { type: "string" }, workers: { type: "string" }, server: { type: "string" }, team: { type: "string" },
     help: { type: "boolean", short: "h" },
   } });
   const [command, label] = positionals, root = process.cwd();
@@ -21,15 +20,13 @@ try {
     for (const label of labels(config)) {
       console.log(`cd ${quote(root)} && ${quote(process.execPath)} ${quote(fileURLToPath(import.meta.url))} start ${label}`);
     }
-  } else if (command === "start" && positionals.length === 2 && Object.keys(values).length === 0) {
+  } else if (command === "add" && positionals.length === 2 && Object.keys(values).every((key) => key === "client")) {
     const config = await loadProject(root), client = await connect(config.server);
-    const { member, file } = await provision(root, config, label, client);
-    console.log(`Starting ${config.project} / ${label}: ${member.node_id}, ${member.ring_id}`);
-    const child = spawn("pi", piArguments(file, config.server), { cwd: root, stdio: "inherit" });
-    const forward = () => child.kill("SIGTERM");
-    process.once("SIGTERM", forward);
-    process.exitCode = await new Promise((resolve, reject) => { child.once("error", reject); child.once("exit", (code) => resolve(code ?? 1)); });
-    process.removeListener("SIGTERM", forward);
+    await addAgent(root, label, values, client);
+    console.log(`Configured ${label} in team ${config.team}. Start it in its own terminal:`);
+    console.log(`cd ${quote(root)} && ${quote(process.execPath)} ${quote(fileURLToPath(import.meta.url))} start ${label}`);
+  } else if (command === "start" && positionals.length === 2 && Object.keys(values).length === 0) {
+    process.exitCode = await startAgent(root, label);
   } else if (command === "inbox" && positionals.length === 2 &&
              Object.keys(values).every((key) => key === "server")) {
     const client = new McpClient(await inboxServer(root, values));
@@ -42,6 +39,6 @@ try {
   // ClientError messages are credential-free by design (see mcp.mjs); print them as-is.
   console.error(e.code === "transport" ? "AgentTalk is unavailable; check the configured server and rerun." :
     e instanceof ClientError ? e.message :
-    "AgentTalk command failed. Check the configuration and Pi installation.\n" + help);
+    "AgentTalk command failed. Check the configuration and selected client installation.\n" + help);
   process.exitCode = 1;
 }

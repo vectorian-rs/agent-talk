@@ -14,7 +14,8 @@ Use the left-hand ring selector to watch one team's agents and messages.
 | Client | Message pickup |
 | --- | --- |
 | Pi with the optional extension | Checks every 10 seconds without model turns for empty checks; wakes idle agents or queues a follow-up while busy. |
-| MCP alone, including Claude and Codex | Ask agents to receive manually, or wire the [Claude Code inbox hook](#claude-code-inbox-hook) to surface pending mail at the edges of a turn. Automatic Claude/Codex adapters are not implemented. |
+| Claude Code through the CLI | File-based MCP setup and inbox hooks at session start and prompt submission. Hooks report pending mail; they do not wake an idle session. |
+| MCP alone, including Codex | Ask agents to receive manually. Automatic idle wake-up is not implemented. |
 
 AgentTalk is optional and preserves your repository's work and approval rules.
 See the [integration contract](integrations/README.md) for host responsibilities.
@@ -37,6 +38,66 @@ The dashboard also acts on the selected ring:
   path, not to the operator.
 
 Both actions are local and need no token, matching the trusted dashboard.
+
+## Add an agent with the CLI
+
+The CLI registers or resumes one named session at a time. It supports Pi and
+Claude Code in the same ring; repository instructions still own project work.
+Node 24+ and the selected client must be installed.
+
+Install the command from this checkout once:
+
+```sh
+cd /path/to/agent-talk/cli
+npm ci --ignore-scripts
+npm link --ignore-scripts
+```
+
+For a new project, run `agent-talk init --client pi --workers 4` from its root,
+then start the PM with `agent-talk start pm`. Init prints each launch command.
+To adopt an existing manually launched team instead, select its directory:
+
+```sh
+cd /path/to/your-repo
+agent-talk init --client pi --workers 4 --team manual-4
+```
+
+This uses `.agent-talk/manual-4/`, not a new ring. The team must have a saved
+`pm.json` or CLI `invitation.json`. When adopting `pm.json`, the CLI verifies it
+with the server and copies only the ring invitation and public IDs. An expired
+PM must be resumed first. Init never registers anything and refuses to replace
+an existing config with conflicting options. Do not start a second PM if yours
+is already running.
+
+Add one more worker, then launch it in its own terminal:
+
+```sh
+agent-talk add cc-w5 --client claude
+agent-talk start cc-w5
+```
+
+Repeat with `cc-w6`, `cc-w7`, or any unused worker label. For another worker of
+the project's default client, `agent-talk add reviewer` is enough. Add only
+updates configuration; start registers or renews the worker in the existing
+ring. Neither action creates a replacement ring. Repeating add with the same
+client is safe; changing an existing label's client is rejected.
+
+Additional clients are stored in `agent-talk.toml`. Private registrations remain
+in `.agent-talk/<team>/<label>.json`. Claude's MCP config, settings and transport
+instructions are generated beside its membership in `<label>.json.claude/`.
+No manual invitation copying or pasted onboarding prompt is needed. The
+launcher does not replace shared Claude settings or repository instructions.
+Approve the MCP connection and tool permissions when Claude asks.
+
+Claude checks its inbox during onboarding and when a hook reports pending mail.
+**An idle Claude session is not awakened automatically.** Prompt it to check its
+inbox when needed. Pi retains its background watcher. Session locks prevent two
+CLI launches using the same membership; they cannot detect manually launched
+clients. If a launcher is killed abruptly, confirm its old client is stopped
+before removing the reported `.session.lock` file.
+
+See [CLI details](docs/cli-draft.md) for configuration and recovery. The manual
+Pi onboarding below remains available without the CLI.
 
 ## Onboard a repository with Pi
 
