@@ -27,13 +27,13 @@ export async function claudeArguments({ file, server, label, pmId }) {
       "The launcher has already registered or renewed this session. Read only your membership file for credentials; do not register a new ring or use another agent's credentials.",
       "Keep node and ring tokens out of output, logs and commits. If you renew or rejoin, save each complete successful registration atomically with mode 0600 before another authenticated call.",
       "Call list_nodes with your saved node_id and token; verify the returned ring_id matches your saved membership.",
-      ...(pmId ? [`Verify ${pmId} is an active PM in your ring, then send it 'joined ${label}; awaiting assignment' with communicate. If it cannot be verified, ask the operator; do not guess a replacement.`] : []),
-      "When the inbox hook reports pending mail, call communicate(action=receive) using your own credentials. Verify senders and assignments. Send receipt, acceptance or blocked, then results; do not acknowledge acknowledgments.",
+      ...(pmId ? [`Verify ${pmId} is an active PM in your ring, then send it 'joined ${label}' with communicate. If it cannot be verified, ask the operator; do not guess a replacement.`] : []),
+      "When the inbox hook reports pending mail, call communicate(action=receive) using your own credentials. Verify senders and assignments. Reply only with the protocol lines your project instructions define; send no receipts or acknowledgments.",
       "Hooks check metadata only at session start and prompt submission. They do not wake an idle session. Do not run empty model polling loops.",
       "If credentials expire, rejoin only the saved ring using the saved role and ring_token, save the complete response, rediscover peers and notify the verified PM of your changed identity. Invalid tokens require the operator.",
     ],
   });
   return ["--name", label, "--mcp-config", mcp, "--settings", settings,
     "--append-system-prompt", "Read and follow the AgentTalk transport binding at " + JSON.stringify(instructions) + ".",
-    "Initialize the configured AgentTalk transport, check your inbox and report readiness. Do not change project files during onboarding."];
+    "Initialize the configured AgentTalk transport and check your inbox. Do not change project files during onboarding."];
 }
