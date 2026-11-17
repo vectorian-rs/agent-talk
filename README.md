@@ -94,8 +94,8 @@ When AgentTalk is selected:
   invitations in private onboarding prompts; never share private node tokens.
 - Receive on host notifications; verify the sender and assignment against
   the project record.
-- Send receipt, acceptance or blocked, then results through AgentTalk.
-  Do not acknowledge acknowledgments.
+- Reply only with the project's protocol lines through AgentTalk.
+  Send no receipts or acknowledgments.
 - The human launches PM and workers; the host polls. No empty model polling.
 Otherwise use the repository's usual workflow.
 ```

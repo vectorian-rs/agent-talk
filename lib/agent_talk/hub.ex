@@ -595,7 +595,8 @@ defmodule AgentTalk.Hub do
       Follow this project's instructions for <ROLE>. Join AgentTalk ring #{node.ring_id}.
       Resume this session's saved credentials only if role and ring match; otherwise call
       register_node with role=<ROLE> and ring_token=<RING_TOKEN>. Save the complete response
-      privately and follow its instructions. Report ready to PM #{node.node_id} in this ring.
+      privately and follow its instructions. Tell PM #{node.node_id} that you joined,
+      then wait for work.
       """)
     else
       data
