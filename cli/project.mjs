@@ -5,13 +5,14 @@ import { parse, stringify } from "smol-toml";
 import { ClientError, McpClient, readMembership, validateInboxMetadata, validateServerUrl } from "../integrations/polling/mcp.mjs";
 
 const keys = ["server", "client", "project", "team", "workers"];
+const clients = ["pi", "claude"];
 const error = (message) => new ClientError("configuration", message);
 
 export function validate(config) {
   const unknown = Object.keys(config).filter((key) => !keys.includes(key));
   if (unknown.length) throw error("Unknown settings in agent-talk.toml: " + unknown.join(", "));
   validateServerUrl(config.server);
-  if (config.client !== "pi") throw error("This draft supports client = pi only.");
+  if (!clients.includes(config.client)) throw error("client must be pi or claude.");
   // 122 = the server's 128-character label limit minus the " / w-N" display-name suffix.
   if (typeof config.project !== "string" || !config.project.trim() || config.project.length > 122 || /[\u0000-\u001f\u007f-\u009f]/u.test(config.project)) {
     throw error("project must be a nonempty label of at most 122 characters without control characters.");
@@ -46,7 +47,7 @@ export async function savePrivate(file, value) {
   finally { await handle?.close(); await rm(temporary, { force: true }); }
 }
 
-async function prepare(root, config) {
+async function prepare(root, config, client = config.client) {
   for (const path of [join(root, ".agent-talk"), stateDir(root, config)]) {
     await mkdir(path, { recursive: true, mode: 0o700 });
     await chmod(path, 0o700);
@@ -56,6 +57,7 @@ async function prepare(root, config) {
   if (!prior.split(/\r?\n/).some((line) => ["/.agent-talk/", "**/.agent-talk/", ".agent-talk/"].includes(line.trim()))) {
     await writeFile(ignore, prior + (prior && !prior.endsWith("\n") ? "\n" : "") + "/.agent-talk/\n");
   }
+  if (client !== "pi") return;
   const file = join(root, ".pi/mcp.json");
   let mcp;
   try { mcp = JSON.parse(await readFile(file, "utf8")); }
@@ -78,10 +80,18 @@ export async function initProject(root, options = {}) {
   catch (e) {
     if (e.code !== "ENOENT") throw e;
     config = validate({ server: options.server ?? "http://127.0.0.1:4000/mcp", client: options.client ?? "pi",
-      project: basename(root), team: "delivery", workers: Number(options.workers ?? 2) });
+      project: basename(root), team: options.team ?? "delivery", workers: Number(options.workers ?? 2) });
     await writeFile(file, stringify(config), { flag: "wx" });
   }
-  if (!config) config = await loadProject(root);
+  if (!config) {
+    config = await loadProject(root);
+    if ((options.team !== undefined && options.team !== config.team) ||
+        (options.client !== undefined && options.client !== config.client) ||
+        (options.server !== undefined && options.server !== config.server) ||
+        (options.workers !== undefined && Number(options.workers) !== config.workers)) {
+      throw error("Existing agent-talk.toml differs from init options; edit it explicitly instead of replacing the team.");
+    }
+  }
   await prepare(root, config);
   return config;
 }
@@ -89,7 +99,31 @@ export async function initProject(root, options = {}) {
 
 export const stateDir = (root, config) => join(root, ".agent-talk", config.team);
 export const memberFile = (root, config, label) => join(stateDir(root, config), label + ".json");
-export const labels = (config) => ["pm", ...Array.from({ length: config.workers }, (_, n) => "w-" + (n + 1))];
+export const labels = (config) => config.label ? ["pm", config.label] : ["pm", ...Array.from({ length: config.workers }, (_, n) => "w-" + (n + 1))];
+
+// Import only the invitation from a manually launched PM. Authenticate it first;
+// never create a replacement ring when adopting an existing team.
+export async function teamInvitation(root, config, client) {
+  const file = join(stateDir(root, config), "invitation.json");
+  let invitation;
+  try { invitation = JSON.parse(await readFile(file, "utf8")); }
+  catch (e) {
+    if (e.code !== "ENOENT") throw error("Cannot read the team invitation; existing state was preserved.");
+    const pm = await readMembership(memberFile(root, config, "pm"));
+    if (!pm) throw error("Start this team's PM before starting workers.");
+    if (pm.role !== "pm" || typeof pm.ring_token !== "string" || !pm.ring_token) throw error("Saved PM lacks a valid invitation; resume the PM first.");
+    const result = await client.call("list_nodes", { node_id: pm.node_id, token: pm.token });
+    if (result?.ring_id !== pm.ring_id || !Array.isArray(result.nodes) || !result.nodes.some((node) => node.node_id === pm.node_id && node.role === "pm" && node.ring_id === pm.ring_id)) {
+      throw error("Saved PM could not be verified in this ring; resume the PM first.");
+    }
+    invitation = { ring_id: pm.ring_id, ring_token: pm.ring_token, pm_id: pm.node_id };
+    await savePrivate(file, invitation);
+  }
+  if (!["ring_id", "ring_token", "pm_id"].every((key) => typeof invitation?.[key] === "string" && invitation[key].length > 0)) {
+    throw error("Invalid team invitation; resume the PM first.");
+  }
+  return invitation;
+}
 
 export async function connect(server) {
   const client = new McpClient(server);
@@ -126,19 +160,13 @@ export async function provision(root, config, label, client) {
   if (!labels(config).includes(label)) throw error("Choose pm or a configured worker label.");
   await prepare(root, config);
   const role = label === "pm" ? "pm" : "worker", file = memberFile(root, config, label);
-  let invitation;
-  if (role === "worker") {
-    try { invitation = JSON.parse(await readFile(join(stateDir(root, config), "invitation.json"), "utf8")); }
-    catch { throw error("Start this team's PM before starting workers."); }
-    if (!["ring_id", "ring_token", "pm_id"].every((key) => typeof invitation?.[key] === "string" && invitation[key].length > 0)) {
-      throw error("Invalid team invitation; resume the PM first.");
-    }
-  }
+  const invitation = role === "worker" ? await teamInvitation(root, config, client) : undefined;
   const saved = await readMembership(file);
   if (saved && (saved.role !== role || (invitation && saved.ring_id !== invitation.ring_id))) {
     throw error("Saved membership does not match this role/team. Use a different team directory.");
   }
-  const labelsArg = { project: config.project, name: config.project + " / " + label };
+  const displayName = config.project + " / " + label;
+  const labelsArg = { project: config.project, name: displayName.length <= 128 ? displayName : label };
   let member;
   if (saved) {
     try { member = await client.call("register_node", { role, node_id: saved.node_id, token: saved.token, ...labelsArg }); }
@@ -157,5 +185,5 @@ export async function provision(root, config, label, client) {
   if (role === "pm") await savePrivate(join(stateDir(root, config), "invitation.json"), {
     ring_id: member.ring_id, ring_token: member.ring_token, pm_id: member.node_id,
   });
-  return { member, file };
+  return { member, file, pmId: invitation?.pm_id };
 }

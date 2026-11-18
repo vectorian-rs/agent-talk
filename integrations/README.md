@@ -34,7 +34,10 @@ Do not implement `wake` as a terminal notification alone. A supported adapter mu
 prove that an idle agent runs and a busy agent handles its queued notification
 without another human prompt. A runtime without turn scheduling needs a supervised
 session runner; a prompt or generic MCP connection cannot add that capability.
-Claude and Codex adapters remain future work.
+Automatic Claude and Codex turn-scheduling adapters remain future work. The
+[CLI](../docs/cli-draft.md) can launch Claude Code with a private membership
+binding and turn-boundary inbox hooks, but those hooks do not implement `wake`
+and are not an automatic inbox adapter.
 
 The host owns polling; agents do not run polling loops or create extra agents.
 Role prompts must handle notifications automatically, send actual replies, and

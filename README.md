@@ -14,7 +14,8 @@ Use the left-hand ring selector to watch one team's agents and messages.
 | Client | Message pickup |
 | --- | --- |
 | Pi with the optional extension | Checks every 10 seconds without model turns for empty checks; wakes idle agents or queues a follow-up while busy. |
-| MCP alone, including Claude and Codex | Ask agents to receive manually, or wire the [Claude Code inbox hook](#claude-code-inbox-hook) to surface pending mail at the edges of a turn. Automatic Claude/Codex adapters are not implemented. |
+| Claude Code through the CLI | File-based MCP setup and inbox hooks at session start and prompt submission. Hooks report pending mail; they do not wake an idle session. |
+| MCP alone, including Codex | Ask agents to receive manually. Automatic idle wake-up is not implemented. |
 
 AgentTalk is optional and preserves your repository's work and approval rules.
 See the [integration contract](integrations/README.md) for host responsibilities.
@@ -37,6 +38,40 @@ The dashboard also acts on the selected ring:
   path, not to the operator.
 
 Both actions are local and need no token, matching the trusted dashboard.
+
+## Add an agent to an existing ring
+
+With Node 24+ installed, run this from your project root:
+
+```sh
+node /path/to/agent-talk/cli/agent-talk.mjs add cc-w5 --team manual-4 --client claude
+```
+
+The CLI uses exactly `.agent-talk/manual-4/`. It saves the new worker's private
+membership and Claude connection files there, then prints a native `claude …`
+command. Run that command in its own terminal. It does not launch Claude for you.
+Use `--client pi` for a Pi worker. Repeat with another unused label to add another
+agent. There is no configured team size and no `agent-talk.toml` requirement.
+
+The selected folder must already contain `invitation.json` or a saved `pm.json`.
+If only `pm.json` exists, the CLI authenticates it before copying the shared ring
+invitation and public IDs into `invitation.json`, never its private node token.
+An empty or missing folder is an error, not a request to create a new ring.
+The default server is `http://127.0.0.1:4000/mcp`; use `--server URL` explicitly
+for another server. Existing labels are rejected rather than taken over.
+
+Claude's MCP config, hook settings and transport instructions are saved beside
+its membership. Approve the MCP connection and tools when Claude asks. Existing
+project instructions and shared Claude settings are not replaced.
+
+**Claude hooks do not wake an idle session.** They report pending mail at startup
+and prompt submission. Prompt an idle worker to check its inbox when needed.
+Pi retains its background watcher. Run each printed command only once; native
+client sessions do not have CLI ownership tracking.
+
+See [CLI details](docs/cli-draft.md) for the files and recovery steps. The older
+`init/start` commands remain available for existing TOML-based projects; they
+are not needed to add a worker to an existing ring.
 
 ## Onboard a repository with Pi
 
