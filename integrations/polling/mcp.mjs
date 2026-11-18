@@ -37,6 +37,10 @@ export function validateInboxMetadata(result, expectedRingId, message) {
     result?.ring_id !== expectedRingId ||
     !Number.isInteger(inbox?.pending_messages) ||
     inbox.pending_messages < 0 ||
+    !(inbox.pending_actionable === undefined ||
+      (Number.isInteger(inbox.pending_actionable) &&
+        inbox.pending_actionable >= 0 &&
+        inbox.pending_actionable <= inbox.pending_messages)) ||
     (inbox.pending_messages === 0
       ? inbox.next_message_id !== null
       : typeof inbox.next_message_id !== "string" || inbox.next_message_id.length === 0)

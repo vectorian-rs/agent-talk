@@ -172,14 +172,18 @@ defmodule AgentTalk.PersistenceTest do
       assert restored.from == pm.node_id
 
       assert Enum.sort(Map.keys(restored)) == [
+               :expects_reply,
                :from,
                :from_name,
                :from_role,
                :id,
+               :kind,
                :message,
+               :project,
                :reply_to,
                :ring_id,
-               :sent_at
+               :sent_at,
+               :to
              ],
              "recovered copies must keep the agreed inbox payload contract"
 

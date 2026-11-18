@@ -8,7 +8,10 @@ defmodule AgentTalk.Tools.Communicate do
   A send queues messages; recipient expiry can discard them before collection.
   Call receive between tasks to collect messages; use register_node for an idle heartbeat.
   When answering a specific message, set reply_to to its id so the answer can be
-  matched to the task it resolves.
+  matched to the task it resolves. Set kind to status or fyi for information the
+  recipient should read at its next turn but not wake for; send kind=ack with
+  reply_to instead of a receipt message. A status or fyi goes to the PM or one
+  peer, never a broadcast.
   Use status to see your own recent sends and which recipients have received each,
   without removing anything.
   """
@@ -22,6 +25,17 @@ defmodule AgentTalk.Tools.Communicate do
     field(:to_role, :string, description: "Role within your ring, or all for every other member")
     field(:message, :string, description: "Message text (up to 65536 bytes)")
     field(:reply_to, :string, description: "Id of the message this send answers")
+
+    field(
+      :kind,
+      {:enum, ["message", "handoff", "decision", "status", "fyi", "ack"]},
+      description:
+        "message is the default; status/fyi never wake the recipient; ack records a receipt and queues nothing"
+    )
+
+    field(:expects_reply, :boolean,
+      description: "Defaults to true for message/handoff/decision and false for status/fyi"
+    )
   end
 
   @impl true

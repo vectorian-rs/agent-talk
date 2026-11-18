@@ -13,7 +13,9 @@ defmodule AgentTalk.History do
     :from_role,
     :from_name,
     :to_names,
-    :project
+    :project,
+    :kind,
+    :expects_reply
   ]
   @schema """
   CREATE TABLE IF NOT EXISTS messages (
