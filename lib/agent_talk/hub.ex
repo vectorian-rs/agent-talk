@@ -23,7 +23,20 @@ defmodule AgentTalk.Hub do
   # from_name/from_role travel with the copy so a recipient can read who sent a
   # message without a separate list_nodes lookup; both are in History's @fields,
   # so a recovered copy carries them too.
-  @message_fields [:id, :from, :from_name, :from_role, :ring_id, :message, :sent_at, :reply_to]
+  @message_fields [
+    :id,
+    :from,
+    :from_name,
+    :from_role,
+    :ring_id,
+    :message,
+    :sent_at,
+    :reply_to,
+    :kind,
+    :expects_reply,
+    :to,
+    :project
+  ]
 
   # Synthetic sender for operator broadcasts. "operator" is not a registered
   # node and owns no token, so it can address a ring but never authenticate.
@@ -34,6 +47,13 @@ defmodule AgentTalk.Hub do
   # Longest wait a list_nodes call may be parked, under common 30-second
   # HTTP/proxy request timeouts (Anubis's plug allows 30s per request).
   @wait_cap_ms 25_000
+
+  # Message semantics. A handoff, decision or plain message asks for work and
+  # wakes a parked waiter; a status or fyi waits for the recipient's next turn.
+  # An ack is a receipt on its parent, never a new message.
+  @kinds ["message", "handoff", "decision", "status", "fyi", "ack"]
+  @actionable_kinds ["message", "handoff", "decision"]
+  @max_body_bytes 1_000
 
   def start_link(opts) do
     GenServer.start_link(__MODULE__, opts, name: Keyword.get(opts, :name, __MODULE__))
@@ -319,14 +339,17 @@ defmodule AgentTalk.Hub do
   end
 
   # Runs after every serialized state change. The wake predicate is hardwired
-  # to "own inbox non-empty or node gone"; a future caller watching anything
-  # else gets an explicit wait_for argument here, not a second parking
-  # mechanism.
+  # to "own inbox holds an actionable message or node gone"; a future caller
+  # watching anything else gets an explicit wait_for argument here, not a
+  # second parking mechanism.
   defp wake_ready_waiters(state) do
     Enum.reduce(Map.keys(state.waiters), state, fn node_id, state ->
       case state.nodes[node_id] do
-        %{inbox: inbox} -> if :queue.is_empty(inbox), do: state, else: wake_waiter(state, node_id)
-        nil -> wake_waiter(state, node_id)
+        %{inbox: inbox} ->
+          if actionable_count(inbox) == 0, do: state, else: wake_waiter(state, node_id)
+
+        nil ->
+          wake_waiter(state, node_id)
       end
     end)
   end
@@ -387,7 +410,7 @@ defmodule AgentTalk.Hub do
         ring_id: ring_id
       }
 
-      emit_event(state, sender, recipients, message, nil)
+      emit_event(state, sender, recipients, message, nil, "decision", true)
     else
       {:error, _, _} = error -> {error, state}
     end
@@ -457,6 +480,7 @@ defmodule AgentTalk.Hub do
 
               inbox = %{
                 pending_messages: :queue.len(caller.inbox),
+                pending_actionable: actionable_count(caller.inbox),
                 next_message_id: next_message_id
               }
 
@@ -466,7 +490,7 @@ defmodule AgentTalk.Hub do
                 wait_ms == nil ->
                   {{:ok, payload}, updated}
 
-                inbox.pending_messages == 0 and wait_ms > 0 ->
+                inbox.pending_actionable == 0 and wait_ms > 0 ->
                   {{:park, caller.node_id, wait_ms, args}, updated}
 
                 true ->
@@ -622,7 +646,10 @@ defmodule AgentTalk.Hub do
   # Only send carries addressing and content; receive and status reject those
   # fields so a misdirected one is an error, not a silently ignored no-op.
   defp content_fields?(args) do
-    Enum.any?([:to, :to_role, :message, :reply_to], &(Map.get(args, &1) != nil))
+    Enum.any?(
+      [:to, :to_role, :message, :reply_to, :kind, :expects_reply],
+      &(Map.get(args, &1) != nil)
+    )
   end
 
   defp communicate(%{action: "receive"} = args, state, node) do
@@ -653,19 +680,17 @@ defmodule AgentTalk.Hub do
   end
 
   defp communicate(%{action: "send"} = args, state, node) do
-    with :ok <- validate_message(Map.get(args, :message)),
-         :ok <- validate_reply_to(Map.get(args, :reply_to)),
-         {:ok, recipients} <- recipients(args, ring_nodes(state, node.ring_id), node.node_id),
-         :ok <- check_capacity(recipients, state) do
-      sender = %{
-        id: node.node_id,
-        role: node.role,
-        name: node_name(node),
-        project: Map.get(node, :project),
-        ring_id: node.ring_id
-      }
+    kind = Map.get(args, :kind, "message")
+    expects_reply = Map.get(args, :expects_reply, kind in @actionable_kinds)
 
-      emit_event(state, sender, recipients, args.message, Map.get(args, :reply_to))
+    with :ok <- validate_kind(kind),
+         :ok <- validate_expects_reply(expects_reply),
+         :ok <- validate_body(Map.get(args, :message), kind) do
+      if kind == "ack" do
+        acknowledge(args, state, node)
+      else
+        send_message(args, state, node, kind, expects_reply)
+      end
     else
       {:error, _, _} = error -> {error, state}
     end
@@ -693,6 +718,57 @@ defmodule AgentTalk.Hub do
         end
 
       {{:ok, %{sent: sent}}, state}
+    end
+  end
+
+  defp send_message(args, state, node, kind, expects_reply) do
+    with :ok <- validate_reply_to(Map.get(args, :reply_to)),
+         {:ok, recipients} <- recipients(args, ring_nodes(state, node.ring_id), node.node_id),
+         :ok <- validate_broadcast(kind, recipients),
+         :ok <- check_capacity(recipients, state) do
+      sender = %{
+        id: node.node_id,
+        role: node.role,
+        name: node_name(node),
+        project: Map.get(node, :project),
+        ring_id: node.ring_id
+      }
+
+      emit_event(
+        state,
+        sender,
+        recipients,
+        Map.get(args, :message),
+        Map.get(args, :reply_to),
+        kind,
+        expects_reply
+      )
+    else
+      {:error, _, _} = error -> {error, state}
+    end
+  end
+
+  # An explicit ack is the receipt the sender would otherwise ask for in prose.
+  # It records the reader on the parent and queues nothing.
+  defp acknowledge(args, state, node) do
+    case Map.get(args, :reply_to) do
+      nil ->
+        {{:error, :invalid_request, "an ack requires reply_to naming the message it answers"},
+         state}
+
+      id ->
+        recorded = Enum.any?(state.messages, &(&1.id == id))
+
+        messages =
+          Enum.map(state.messages, fn event ->
+            if event.id == id do
+              %{event | received_by: Enum.uniq([node.node_id | event.received_by])}
+            else
+              event
+            end
+          end)
+
+        {{:ok, %{receipt: id, recorded: recorded}}, %{state | messages: messages}}
     end
   end
 
@@ -748,7 +824,7 @@ defmodule AgentTalk.Hub do
   # operator broadcast each build a `sender` descriptor and call this, so the
   # event schema (see @message_fields) stays defined in exactly one place and
   # both paths archive, deliver and render identically.
-  defp emit_event(state, sender, recipients, message, reply_to) do
+  defp emit_event(state, sender, recipients, message, reply_to, kind, expects_reply) do
     {id, state} = allocate_id("message", state)
 
     event = %{
@@ -758,6 +834,8 @@ defmodule AgentTalk.Hub do
       message: message,
       sent_at: timestamp(state),
       reply_to: reply_to,
+      kind: kind,
+      expects_reply: expects_reply,
       to: recipients,
       from_role: sender.role,
       from_name: sender.name,
@@ -771,6 +849,43 @@ defmodule AgentTalk.Hub do
 
     {{:ok, %{message_id: event.id, delivered_to: recipients}},
      %{state | nodes: nodes, messages: history}}
+  end
+
+  defp validate_kind(kind) when kind in @kinds, do: :ok
+
+  defp validate_kind(_kind),
+    do: {:error, :invalid_request, "kind must be one of #{Enum.join(@kinds, ", ")}"}
+
+  defp validate_expects_reply(value) when is_boolean(value), do: :ok
+
+  defp validate_expects_reply(_value),
+    do: {:error, :invalid_request, "expects_reply must be true or false"}
+
+  defp validate_body(_message, "ack"), do: :ok
+
+  defp validate_body(message, kind) do
+    with :ok <- validate_message(message) do
+      if kind == "decision" or byte_size(message) <= @max_body_bytes do
+        :ok
+      else
+        {:error, :invalid_request,
+         "a #{kind} message is at most #{@max_body_bytes} bytes; put the detail in the record"}
+      end
+    end
+  end
+
+  # A status is one reader's information, not a broadcast. Decisions are the
+  # only kind that reaches every member in one send.
+  defp validate_broadcast(kind, recipients)
+       when kind in ["status", "fyi"] and length(recipients) > 2 do
+    {:error, :invalid_request,
+     "a #{kind} goes to the PM or one peer; the record is the broadcast"}
+  end
+
+  defp validate_broadcast(_kind, _recipients), do: :ok
+
+  defp actionable_count(inbox) do
+    Enum.count(:queue.to_list(inbox), &Map.get(&1, :expects_reply, true))
   end
 
   defp validate_message(message) when is_binary(message) do

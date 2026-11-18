@@ -50,7 +50,13 @@ defmodule AgentTalk.MCPTest do
     ids = Enum.map(workers, fn {_client, node} -> node["node_id"] end) |> Enum.sort()
     nodes = call(AgentTalk.TestPM, "list_nodes", auth(pm, %{role: "worker"}))
     assert nodes["ring_id"] == pm["ring_id"]
-    assert nodes["inbox"] == %{"pending_messages" => 0, "next_message_id" => nil}
+
+    assert nodes["inbox"] == %{
+             "pending_messages" => 0,
+             "pending_actionable" => 0,
+             "next_message_id" => nil
+           }
+
     assert Enum.map(nodes["nodes"], & &1["node_id"]) == ids
 
     assert Enum.all?(nodes["nodes"], &(&1["purpose"] == "runs deployments")),
@@ -91,6 +97,7 @@ defmodule AgentTalk.MCPTest do
 
       assert inbox_status["inbox"] == %{
                "pending_messages" => 1,
+               "pending_actionable" => 1,
                "next_message_id" => sent["message_id"]
              }
 

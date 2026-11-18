@@ -143,6 +143,8 @@ export class InboxWatcher {
       if (this.stale(runId)) return;
       const inbox = validateInboxMetadata(result, member.ring_id,
         "Update AgentTalk: list_nodes must return inbox metadata.");
+      // Older servers do not send pending_actionable; every message is actionable there.
+      const actionable = inbox.pending_actionable ?? inbox.pending_messages;
       this.lastCheck = new Date().toISOString();
       this.authNotified = false;
       if (inbox.next_message_id !== this.head) {
@@ -152,7 +154,7 @@ export class InboxWatcher {
       if (this.paused) {
         this.report("paused", "AgentTalk monitoring inbox; automatic turns paused after cancellation. " +
           "Send a prompt or use /agent-talk on to resume.");
-      } else if (inbox.pending_messages === 0) {
+      } else if (actionable === 0) {
         this.immediate = typeof result.waited_seconds === "number" && result.waited_seconds > 0;
         this.report("watching", "AgentTalk watching inbox");
       } else if (this.attempts >= 3 && !this.notified) {
@@ -161,7 +163,8 @@ export class InboxWatcher {
         this.notified = true;
         this.attempts++;
         const sent = await this.requestWake({ kind: "inbox", node_id: member.node_id, role: member.role,
-          ring_id: member.ring_id, pending_messages: inbox.pending_messages }, runId);
+          ring_id: member.ring_id, pending_messages: inbox.pending_messages,
+          pending_actionable: actionable }, runId);
         // A stop() during the wake must not let this run clear the restarted
         // run's notified flag, which would let it wake a second time.
         if (this.stale(runId)) return;
@@ -173,7 +176,7 @@ export class InboxWatcher {
           this.failures++;
           return;
         }
-        this.report("pending", "AgentTalk inbox: " + inbox.pending_messages + " · turn requested");
+        this.report("pending", "AgentTalk inbox: " + actionable + " actionable · turn requested");
       }
       this.failures = 0;
     } catch (error) {

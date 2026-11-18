@@ -758,6 +758,94 @@ defmodule AgentTalk.HubTest do
     end
   end
 
+  test "a status is pending but not actionable, a handoff is both", %{hub: hub, pm: pm} do
+    worker = join(hub, pm)
+
+    assert {:ok, _} =
+             send_message(hub, pm, %{
+               to: [worker.node_id],
+               message: "the budget moved",
+               kind: "status"
+             })
+
+    assert {:ok, %{inbox: inbox}} = Hub.list_nodes(auth(worker), hub)
+    assert inbox.pending_messages == 1
+    assert inbox.pending_actionable == 0
+
+    assert {:ok, _} =
+             send_message(hub, pm, %{
+               to: [worker.node_id],
+               message: "pick up #1 feature",
+               kind: "handoff"
+             })
+
+    assert {:ok, %{inbox: inbox}} = Hub.list_nodes(auth(worker), hub)
+    assert inbox.pending_actionable == 1
+  end
+
+  test "the inbox copy carries kind, recipients and project", %{hub: hub, pm: pm} do
+    worker = join(hub, pm)
+
+    assert {:ok, _} =
+             send_message(hub, pm, %{to: [worker.node_id], message: "a status", kind: "status"})
+
+    assert {:ok, %{messages: [message]}} = receive_messages(hub, worker)
+    assert message.kind == "status"
+    assert message.expects_reply == false
+    assert message.to == [worker.node_id]
+    assert Map.has_key?(message, :project)
+  end
+
+  test "an ack records a receipt and queues nothing", %{hub: hub, pm: pm} do
+    worker = join(hub, pm)
+
+    assert {:ok, %{message_id: id}} =
+             send_message(hub, pm, %{
+               to: [worker.node_id],
+               message: "pick up #1 feature",
+               kind: "handoff"
+             })
+
+    assert {:ok, %{receipt: ^id, recorded: true}} =
+             send_message(hub, worker, %{reply_to: id, kind: "ack"})
+
+    assert {:ok, %{sent: sent}} = Hub.communicate(auth(pm, %{action: "status"}), hub)
+    assert Enum.any?(sent, &(&1.id == id and worker.node_id in &1.received_by))
+    assert {:ok, %{inbox: %{pending_messages: 0}}} = Hub.list_nodes(auth(pm), hub)
+  end
+
+  test "a status goes to at most two recipients; a decision may broadcast", %{hub: hub, pm: pm} do
+    worker = join(hub, pm)
+    second = join(hub, pm)
+    third = join(hub, pm)
+    everyone = [worker.node_id, second.node_id, third.node_id]
+
+    assert {:error, :invalid_request, why} =
+             send_message(hub, pm, %{to: everyone, message: "a status", kind: "status"})
+
+    assert why =~ "the record is the broadcast"
+
+    assert {:ok, _} =
+             send_message(hub, pm, %{
+               to: everyone,
+               message: "the schema is frozen",
+               kind: "decision"
+             })
+  end
+
+  test "an information body is capped; a decision is not", %{hub: hub, pm: pm} do
+    worker = join(hub, pm)
+    long = String.duplicate("a", 1_001)
+
+    assert {:error, :invalid_request, why} =
+             send_message(hub, pm, %{to: [worker.node_id], message: long, kind: "status"})
+
+    assert why =~ "put the detail in the record"
+
+    assert {:ok, _} =
+             send_message(hub, pm, %{to: [worker.node_id], message: long, kind: "decision"})
+  end
+
   defp register(hub, args) do
     {:ok, node} = Hub.register(args, hub)
     node
