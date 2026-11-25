@@ -1,6 +1,8 @@
 # Pi, Claude Code and Codex support
 
 Status: proposed implementation plan, not a claim that all three clients work.
+The approved membership model is durable identity with expiring presence. The
+broker foundation is implemented for review in PR #24; it is not deployed.
 
 ## Goal
 
@@ -65,7 +67,8 @@ Use the existing `.agent-talk/<team>/` directory:
   These are runtime artifacts, not another configuration system.
 
 The stable local identity is the explicit server, ring and logical label. A
-server node_id identifies one leased registration, not an eternal worker.
+server node_id identifies a durable registration until explicit revocation.
+Inactivity and downtime never allocate a replacement identity.
 Display labels are not authentication and cannot prove a sender's identity.
 Client session/thread IDs are separate from AgentTalk node IDs and must be bound
 through supported client APIs, never guessed from recent transcript files.
@@ -83,8 +86,9 @@ must not reimplement them, and the model must not be responsible for them.
 | Condition | Required action |
 | --- | --- |
 | New label, valid invitation | Join as worker; validate role and expected ring; save complete response before another authenticated call. |
-| Saved identity, valid lease | Authenticate/renew; keep node_id; save the complete successful registration. |
-| Lease expired | Rejoin with the saved role and the same ring invitation; validate and save the new identity; notify/reconcile peers before resuming assignments. |
+| Saved identity, online or offline | Authenticate/resume; keep node_id and credentials; save the complete successful registration. |
+| Presence timeout passed | Show offline; retain membership and queued mail. The next authenticated call makes the same identity online. |
+| Membership absent or revoked | Stop and require the operator. Never silently replace the identity. |
 | Invalid private token | Stop with a safe diagnostic. Do not silently allocate a new identity or try another token. |
 | Invalid ring invitation | Stop and require an operator-supplied invitation. Never create a replacement ring. |
 | Wrong role, server or ring | Stop without replacing files or changing team selection. |
@@ -95,33 +99,37 @@ must not reimplement them, and the model must not be responsible for them.
 | Stale ownership lock | Verify owner exit using reliable process/session identity, or require explicit operator recovery. Never steal a possibly live identity based on age alone. |
 
 A lost join response has an uncertain outcome. Add a scoped registration
-idempotency key, persisted before join/rejoin and checked by the server, so retry
+idempotency key, persisted before a new join and checked by the server, so retry
 of that operation cannot allocate duplicate nodes. Authentication is still
 required; a key alone must not reveal registration credentials. Do not extend
 this retry rule to message sends or receives.
 
-The server is authoritative for lease validity. An old last_seen in a local JSON
-file does not prove expiry because metadata calls can renew the server lease.
-Heartbeats run below the configured TTL while the client is alive, independently
-of model turns. Long-poll timeouts must exceed server wait grants. Distinguish
-transport session expiry from registration expiry in errors and recovery.
+The server is authoritative for membership and presence. An old last_seen in a
+local JSON file does not prove inactivity because metadata calls update server
+presence without rewriting the client file. Heartbeats run below the configured
+presence timeout while the client is alive, independently of model turns.
+Long-poll timeouts must exceed server wait grants. Transport session expiry is
+not loss of membership.
 
-A persistent broker restart preserves a still-valid identity and ring. Downtime
-counts toward TTL. Loss of the broker's durable membership store is an operator
-incident, not a reason to invent a new ring from client files.
+A persistent broker restart preserves identity and ring, including after long
+downtime. Presence timestamps may be slightly stale after a crash; this cannot
+delete an identity. Loss of the durable membership store is an operator incident,
+not a reason to invent a new ring from client files.
 
-If a PM rejoins with a new node_id, update the authoritative invitation's public
+If the operator explicitly replaces a PM, update the authoritative invitation's public
 PM pointer after validating and saving that PM's registration. Workers must not
 keep blindly sending to an old PM ID or select a replacement by display name.
 Across machines, explicitly redistribute the updated invitation.
 
-Expired identities lose their old inbox. Archive history is not permission to
-replay work. Notify the PM of changed identity and reconcile unfinished work
-against the project record. Do not claim exactly-once delivery or execution.
+Offline identities retain accepted mail, subject to bounded capacity for new
+sends. Explicit eviction discards that inbox. Archive history is not permission
+to replay work. After an explicit replacement, notify peers and reconcile
+unfinished work against the project record. Do not claim exactly-once delivery
+or execution. Identities already removed by older servers cannot be resurrected.
 
 ## Credentials stay outside the model
 
-Startup, renewal, rejoin, heartbeat and file writes run in host code. Generated
+Startup, resume, new enrollment, heartbeat and file writes run in host code. Generated
 prompts, hooks, process arguments, logs and tool results contain no tokens.
 Do not ask a model to run jq, sed or cat over membership files, and do not add
 broad credential-read permission exceptions to make recovery succeed.
@@ -140,7 +148,7 @@ stronger security boundary.
 
 Use the same shared lifecycle module behind the facade, recovery helper and
 watcher. Establish one writer/owner for the membership; do not let a monitor and
-a tool call race to rejoin it. Test the facade and ownership boundary before
+a tool call race to update or replace it. Test the facade and ownership boundary before
 removing raw authenticated MCP access from existing setups.
 
 Treat a token printed in a transcript as exposed. Do not echo it during diagnosis.
@@ -197,14 +205,15 @@ new session supervisor. No terminal keystroke injection or transcript scraping.
 
 Report registration state, client attachment, last successful heartbeat, watcher
 state, pending actionable mail, last requested turn and last verified round trip
-separately. An active lease is not proof the model is working. Advertise whether
+separately. Online presence is not proof the model is working. Advertise whether
 this session uses native delivery, scheduled polling, manual checks, or is blocked.
 Never label a connection 'ready' solely because initialize or list_nodes passed.
 
 ## Implementation order and release gates
 
-1. Shared membership lifecycle and safe error codes, including join idempotency,
-   locks, expiry recovery and atomic-write failure tests. No model involvement.
+1. Durable broker membership with separate presence and safe error codes (PR #24).
+   Then shared host-side lifecycle, join idempotency, locks and atomic-write
+   failure tests. No model involvement; no automatic rejoin for missing identities.
 2. Credential-bound tools plus add/resume/status. Test simulated credential-read
    denial; it must not affect host-side recovery. Install a versioned runtime
    outside mutable development worktrees; printed commands refer to that runtime.
@@ -219,10 +228,11 @@ Never label a connection 'ready' solely because initialize or list_nodes passed.
 For every supported client test:
 
 - Add to the chosen ring without counts or TOML, preserving all existing agents.
-- Delay launch past TTL, then start and recover without printing/reading secrets
-  through the model. Renew a valid identity without changing its ID.
-- Expiry during a running session and a fresh join after multiple days offline.
-- Broker restart within TTL, restart after TTL, and server offline/back online.
+- Delay launch past the presence timeout; resume with the same ID and credentials
+  without reading/printing secrets through the model.
+- Multiple days offline, queued mail retained, and return with the same identity.
+- Broker restart before/after the presence timeout, and server offline/back online.
+- Explicit eviction invalidates saved credentials and requires operator action.
 - Invalid token, invitation, role/server/ring mismatch and corrupt private JSON.
 - Lost registration response, failed atomic save, concurrent calls and launches.
 - Idle delivery without user input; queued delivery after a busy turn; no empty
