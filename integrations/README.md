@@ -34,7 +34,9 @@ Do not implement `wake` as a terminal notification alone. A supported adapter mu
 prove that an idle agent runs and a busy agent handles its queued notification
 without another human prompt. A runtime without turn scheduling needs a supervised
 session runner; a prompt or generic MCP connection cannot add that capability.
-Claude and Codex adapters remain future work.
+Claude and Codex adapters remain future work; the proposed
+[cross-platform support plan](../docs/plan-platform-membership.md) covers membership
+recovery, credential handling and the tests required before advertising support.
 
 The host owns polling; agents do not run polling loops or create extra agents.
 Role prompts must handle notifications automatically, send actual replies, and
