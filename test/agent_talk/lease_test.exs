@@ -29,8 +29,8 @@ defmodule AgentTalk.LeaseTest do
     at(clock, 30 * 86_400_000)
     renewed = renew(hub, pm)
     assert renewed.node_id == pm.node_id
-    assert renewed.token == pm.token
-    assert renewed.ring_token == pm.ring_token
+    same_credentials = renewed.token == pm.token and renewed.ring_token == pm.ring_token
+    assert same_credentials, "renewal must preserve both credentials"
     assert renewed.online
     assert renewed.expires_in_seconds == nil
   end
@@ -145,29 +145,6 @@ defmodule AgentTalk.LeaseTest do
     end
   end
 
-  test "offline inbox capacity still rejects new mail without deleting accepted mail", %{
-    clock: clock
-  } do
-    hub =
-      start_supervised!(
-        Supervisor.child_spec(
-          {Hub,
-           name: nil,
-           presence_timeout_ms: 1000,
-           max_inbox: 1,
-           clock: fn -> Agent.get(clock, & &1) end},
-          id: :bounded_offline
-        )
-      )
-
-    pm = register(hub, %{role: "pm"})
-    worker = join(hub, pm)
-    assert {:ok, _} = send_message(hub, pm, [worker.node_id], "Accepted")
-    at(clock, 100_000)
-    assert {:error, :inbox_full, _} = send_message(hub, pm, [worker.node_id], "Rejected")
-    assert {:ok, %{messages: [%{message: "Accepted"}]}} = receive_messages(hub, worker)
-  end
-
   test "concurrent returns after a long offline period preserve one identity", %{
     hub: hub,
     clock: clock,
@@ -176,7 +153,11 @@ defmodule AgentTalk.LeaseTest do
     worker = join(hub, pm)
     at(clock, 30 * 86_400_000)
     results = concurrent(fn -> renew(hub, worker) end)
-    assert Enum.all?(results, &(&1.node_id == worker.node_id and &1.token == worker.token))
+
+    same_identity =
+      Enum.all?(results, &(&1.node_id == worker.node_id and &1.token == worker.token))
+
+    assert same_identity, "every return must preserve the identity and token"
     assert member(hub, worker).online
   end
 

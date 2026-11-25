@@ -24,16 +24,14 @@ defmodule AgentTalk.Config do
     port = positive_integer!(data, "port")
     if port > 65_535, do: raise(ArgumentError, "port must be 1..65535")
 
-    if Map.has_key?(data, "presence_timeout_seconds") and Map.has_key?(data, "node_ttl_seconds") do
+    legacy? = Map.has_key?(data, "node_ttl_seconds")
+
+    if legacy? and Map.has_key?(data, "presence_timeout_seconds") do
       raise ArgumentError,
             "use presence_timeout_seconds, not both presence and legacy node_ttl_seconds"
     end
 
-    presence_key =
-      if Map.has_key?(data, "presence_timeout_seconds"),
-        do: "presence_timeout_seconds",
-        else: "node_ttl_seconds"
-
+    presence_key = if legacy?, do: "node_ttl_seconds", else: "presence_timeout_seconds"
     presence_seconds = positive_integer!(data, presence_key)
     history_limit = positive_integer!(data, "message_history_limit")
     membership_file = Map.get(data, "membership_file", "../data/memberships.json")

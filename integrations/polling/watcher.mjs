@@ -180,14 +180,10 @@ export class InboxWatcher {
     } catch (error) {
       if (this.stale(runId)) return;
       this.failures++;
-      if (error.code === "missing") {
+      if (["missing", "expired", "token"].includes(error.code)) {
         this.report("registration", error.message);
         // Revocation is not permission to rejoin as a replacement identity.
-        return;
-      }
-      if (["expired", "token"].includes(error.code)) {
-        this.report("registration", error.message);
-        if (!this.paused && !this.authNotified) {
+        if (error.code !== "missing" && !this.paused && !this.authNotified) {
           this.authNotified = true;
           const woke = await this.requestWake({ kind: "recovery" }, runId);
           if (this.stale(runId)) return;

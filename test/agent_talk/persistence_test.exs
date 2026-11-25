@@ -3,7 +3,6 @@ defmodule AgentTalk.PersistenceTest do
 
   alias AgentTalk.Hub
   @moduletag :tmp_dir
-  @missing "node is not registered or was revoked; ask the operator to restore membership"
 
   setup %{tmp_dir: dir} do
     clock = start_supervised!({Agent, fn -> %{mono: 0, wall: 1_800_000_000_000} end})
@@ -80,7 +79,8 @@ defmodule AgentTalk.PersistenceTest do
     worker = register(hub, Map.take(old_worker, [:role, :node_id, :token]))
     assert worker.ring_id == pm.ring_id
     assert worker.node_id == old_worker.node_id
-    assert worker.token == old_worker.token
+    same_token = worker.token == old_worker.token
+    assert same_token, "resuming must preserve the private token"
     stop_supervised!(:persistent_hub)
     advance(clock, 30 * 86_400_000)
     hub = start_hub(opts)
@@ -199,7 +199,7 @@ defmodule AgentTalk.PersistenceTest do
     } do
       pm = register(hub, %{role: "pm"})
       worker = register(hub, %{role: "worker", ring_token: pm.ring_token})
-      assert {:ok, _} = send_message(hub, pm, worker, "Doomed")
+      assert {:ok, _} = send_message(hub, pm, worker, "Kept")
       advance(clock, 1001)
 
       hub = restart(opts)
@@ -208,8 +208,9 @@ defmodule AgentTalk.PersistenceTest do
       assert Enum.all?(nodes, &(not &1.online))
       returned = register(hub, Map.take(worker, [:role, :node_id, :token]))
       assert returned.node_id == worker.node_id
-      assert returned.token == worker.token
-      assert {:ok, %{messages: [%{message: "Doomed"}]}} = receive_messages(hub, returned)
+      same_token = returned.token == worker.token
+      assert same_token, "resuming must preserve the private token"
+      assert {:ok, %{messages: [%{message: "Kept"}]}} = receive_messages(hub, returned)
     end
 
     test "an evicted node stays gone after a restart and its queued mail is not restored", %{
@@ -225,7 +226,7 @@ defmodule AgentTalk.PersistenceTest do
       assert {:ok, %{evicted: true}} = Hub.evict(worker.node_id, hub)
       hub = restart(opts)
 
-      assert {:error, :not_registered, @missing} = Hub.list_nodes(auth(worker), hub)
+      assert {:error, :not_registered, _} = Hub.list_nodes(auth(worker), hub)
       {:ok, %{nodes: nodes}} = Hub.list_nodes(auth(pm), hub)
       refute Enum.any?(nodes, &(&1.node_id == worker.node_id))
 

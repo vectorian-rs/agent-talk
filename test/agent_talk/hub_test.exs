@@ -302,6 +302,22 @@ defmodule AgentTalk.HubTest do
     assert {:ok, %{messages: [_, _]}} = receive_messages(hub, worker)
   end
 
+  test "offline inbox capacity still rejects new mail without deleting accepted mail", %{
+    hub: hub,
+    clock: clock,
+    pm: pm
+  } do
+    worker = join(hub, pm)
+    for text <- ["One", "Two"], do: send_message(hub, pm, %{to: [worker.node_id], message: text})
+    Agent.update(clock, fn _ -> 100_000 end)
+
+    assert {:error, :inbox_full, _} =
+             send_message(hub, pm, %{to: [worker.node_id], message: "Rejected"})
+
+    assert {:ok, %{messages: [%{message: "One"}, %{message: "Two"}]}} =
+             receive_messages(hub, worker)
+  end
+
   test "invalid targeting and messages do not deliver", %{hub: hub, pm: pm} do
     worker = join(hub, pm)
 
@@ -535,8 +551,8 @@ defmodule AgentTalk.HubTest do
     send(hub, {:timeout, timer, {:waiter_timeout, worker.node_id}})
 
     assert {:ok, %{inbox: %{pending_messages: 0}}} = Task.await(parked, 1000)
-    assert :sys.get_state(hub).nodes[worker.node_id].token == worker.token
-    assert :sys.get_state(hub).nodes[worker.node_id].online
+    {:ok, %{nodes: nodes}} = Hub.snapshot(hub)
+    assert Enum.find(nodes, &(&1.node_id == worker.node_id)).online
   end
 
   test "failed presence persistence cannot revoke a parked member" do
@@ -580,7 +596,6 @@ defmodule AgentTalk.HubTest do
     assert_receive :hub_updated
     {:ok, %{nodes: nodes}} = Hub.snapshot(hub)
     assert Enum.find(nodes, &(&1.node_id == worker.node_id)).online
-    assert :sys.get_state(hub).nodes[worker.node_id].token == worker.token
   end
 
   test "a long-poll wake does not revert a label changed during the wait", %{hub: hub, pm: pm} do

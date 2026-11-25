@@ -53,14 +53,14 @@ defmodule AgentTalk.Hub do
     end
   end
 
-  # The hold a request may be granted, before the per-call ttl/2 term; shared so
+  # The hold a request may be granted, before the per-call presence/2 term; shared so
   # the client timeout and the server grant can never disagree on the cap.
   defp wait_cap_ms(seconds), do: min(seconds * 1000, @wait_cap_ms)
 
   def communicate(args, server \\ __MODULE__), do: GenServer.call(server, {:communicate, args})
   def snapshot(server \\ __MODULE__), do: GenServer.call(server, :snapshot)
 
-  # Operator-initiated removal of a node (force-expire). Called in-process from
+  # Operator-initiated revocation of a node. Called in-process from
   # the trusted local dashboard, not over MCP, so it takes no token.
   def evict(node_id, server \\ __MODULE__), do: GenServer.call(server, {:evict, node_id})
 
@@ -148,8 +148,7 @@ defmodule AgentTalk.Hub do
 
     state
     |> Map.merge(%{saved | nodes: nodes})
-    |> Map.merge(%{presence_dirty: false, presence_flushed_at: now})
-    |> refresh_presence(now)
+    |> Map.merge(%{presence_dirty: false, presence_flushed_at: now, swept_at: now})
   end
 
   defp inbox_message(event), do: Map.take(event, @message_fields)
@@ -179,7 +178,7 @@ defmodule AgentTalk.Hub do
   @impl true
   def handle_call(request, from, state) do
     now = state.clock.()
-    {reply, updated} = dispatch(request, refresh_presence(state, now), now)
+    {reply, updated} = dispatch(request, state, now)
 
     case persist(state, updated, now) do
       {:ok, persisted} ->
@@ -216,17 +215,12 @@ defmodule AgentTalk.Hub do
   @impl true
   def handle_info(:sweep, state) do
     now = state.clock.()
-    updated = refresh_presence(state, now)
     Process.send_after(self(), :sweep, sweep_interval(state))
+    {:ok, flushed} = flush_presence(state, now)
 
-    case persist(state, updated, now) do
-      {:ok, persisted} ->
-        notify_if_changed(state, persisted)
-        {:noreply, wake_ready_waiters(persisted)}
-
-      {:error, _} ->
-        {:noreply, state}
-    end
+    # Going offline is the one visible change no call makes, so announce it here.
+    if online_ids(state, state.swept_at) != online_ids(state, now), do: notify(state)
+    {:noreply, %{flushed | swept_at: now}}
   end
 
   # Cancelling a timer cannot unsend an already-queued timeout, so a timeout
@@ -236,9 +230,11 @@ defmodule AgentTalk.Hub do
     case Map.get(state.waiters, node_id) do
       {_from, ^timer, _args} ->
         # A returning long poll updates presence, never allocates a new identity.
-        # An explicitly evicted caller still receives not_registered.
+        # A healthy caller's renewal is presence-only, so only a caller that went
+        # offline while parked is announced.
+        now = state.clock.()
         updated = wake_waiter(state, node_id)
-        notify_if_changed(state, updated)
+        if online_ids(state, now) != online_ids(updated, now), do: notify(updated)
         {:noreply, updated}
 
       _ ->
@@ -312,10 +308,10 @@ defmodule AgentTalk.Hub do
     end)
   end
 
-  # Presence is also refreshed on every call; the timer covers idle servers.
+  # Presence is derived on every read; the sweep only flushes and announces it.
   defp sweep_interval(state), do: state.presence_ms |> div(20) |> min(60_000) |> max(1000)
 
-  defp dispatch(:snapshot, state, _now) do
+  defp dispatch(:snapshot, state, now) do
     pending =
       Map.new(state.nodes, fn {id, node} ->
         {id, MapSet.new(:queue.to_list(node.inbox), & &1.id)}
@@ -333,7 +329,7 @@ defmodule AgentTalk.Hub do
       end)
 
     data = %{
-      nodes: public_nodes(state.nodes),
+      nodes: public_nodes(state.nodes, state, now),
       messages: messages,
       history_limit: state.history_limit,
       history_persistent: not is_nil(Map.get(state, :history_db))
@@ -342,8 +338,8 @@ defmodule AgentTalk.Hub do
     {{:ok, data}, state}
   end
 
-  # Explicit revocation removes the node and its queued mail;
-  # and handle_call's persist + broadcast then apply. Idempotent — an unknown or
+  # Explicit revocation removes the node and its queued mail; handle_call's
+  # persist + broadcast then apply. Idempotent — an unknown or
   # already-gone id reports evicted: false and changes nothing.
   defp dispatch({:evict, node_id}, state, _now) do
     {existing, nodes} = Map.pop(state.nodes, node_id)
@@ -427,7 +423,7 @@ defmodule AgentTalk.Hub do
 
               nodes =
                 ring_nodes(updated, caller.ring_id)
-                |> public_nodes()
+                |> public_nodes(updated, now)
                 |> Enum.filter(&(role == nil or &1.role == role))
 
               next_message_id =
@@ -485,15 +481,12 @@ defmodule AgentTalk.Hub do
   end
 
   defp renew_node(args, state, now) do
-    case state.nodes[args.node_id] do
-      nil ->
-        {{:error, :not_registered, @missing_node_error}, state}
+    case authenticate(args, state, now) do
+      {:error, _, _} = error ->
+        {error, state}
 
-      node ->
+      {:ok, node, updated} ->
         cond do
-          args.token != node.token ->
-            {{:error, :invalid_token, @invalid_token_error}, state}
-
           args.role != node.role ->
             {{:error, :invalid_request, "renewal cannot change role"}, state}
 
@@ -502,13 +495,13 @@ defmodule AgentTalk.Hub do
             {{:error, :invalid_ring_token, "ring_token does not match this node's ring"}, state}
 
           true ->
-            node =
-              node
-              |> Map.merge(Map.take(args, @label_fields))
-              |> Map.merge(%{seen_at: now, last_seen: timestamp(state), online: true})
+            updated =
+              update_in(
+                updated.nodes[node.node_id],
+                &Map.merge(&1, Map.take(args, @label_fields))
+              )
 
-            updated = put_in(state.nodes[node.node_id], node)
-            {{:ok, registration(node, updated)}, updated}
+            {{:ok, registration(updated.nodes[node.node_id], updated, now)}, updated}
         end
     end
   end
@@ -545,17 +538,16 @@ defmodule AgentTalk.Hub do
       token: new_token(),
       inbox: :queue.new(),
       seen_at: now,
-      online: true,
       last_seen: timestamp(state)
     }
 
     updated = put_in(state.nodes[node.node_id], node)
-    {{:ok, registration(node, updated)}, updated}
+    {{:ok, registration(node, updated, now)}, updated}
   end
 
-  defp registration(node, state) do
+  defp registration(node, state, now) do
     data =
-      Map.merge(public_node(node), %{
+      Map.merge(public_node(node, state, now), %{
         token: node.token,
         ring_token: state.rings[node.ring_id],
         expires_in_seconds: nil,
@@ -596,12 +588,7 @@ defmodule AgentTalk.Hub do
       node ->
         if Map.get(args, :token) == node.token do
           updated =
-            put_in(state.nodes[node.node_id], %{
-              node
-              | seen_at: now,
-                last_seen: timestamp(state),
-                online: true
-            })
+            put_in(state.nodes[node.node_id], %{node | seen_at: now, last_seen: timestamp(state)})
 
           {:ok, node, updated}
         else
@@ -880,27 +867,29 @@ defmodule AgentTalk.Hub do
   defp ring_nodes(state, ring_id),
     do: Map.filter(state.nodes, fn {_id, node} -> node.ring_id == ring_id end)
 
-  defp public_nodes(nodes) do
-    nodes |> Map.values() |> Enum.sort_by(& &1.node_id) |> Enum.map(&public_node/1)
+  defp public_nodes(nodes, state, now) do
+    nodes
+    |> Map.values()
+    |> Enum.sort_by(& &1.node_id)
+    |> Enum.map(&public_node(&1, state, now))
   end
 
-  defp refresh_presence(state, now) do
-    nodes =
-      Map.new(state.nodes, fn {id, node} ->
-        {id, Map.put(node, :online, now - node.seen_at < state.presence_ms)}
-      end)
+  # Derived, never stored: presence changes with time alone, so a stored flag
+  # would go stale between calls and make an unpersisted flip look like a change.
+  defp online?(node, state, now), do: now - node.seen_at < state.presence_ms
 
-    %{state | nodes: nodes}
-  end
+  defp online_ids(state, now),
+    do: for({id, node} <- state.nodes, online?(node, state, now), do: id)
 
   defp notify_if_changed(previous, updated) do
-    if updated.pubsub &&
-         (previous.nodes != updated.nodes or previous.messages != updated.messages) do
-      Phoenix.PubSub.broadcast(updated.pubsub, topic(), :hub_updated)
-    end
+    if previous.nodes != updated.nodes or previous.messages != updated.messages,
+      do: notify(updated)
   end
 
-  defp public_node(node) do
+  defp notify(%{pubsub: nil}), do: :ok
+  defp notify(state), do: Phoenix.PubSub.broadcast(state.pubsub, topic(), :hub_updated)
+
+  defp public_node(node, state, now) do
     %{
       node_id: node.node_id,
       role: node.role,
@@ -909,7 +898,7 @@ defmodule AgentTalk.Hub do
       project: Map.get(node, :project),
       purpose: Map.get(node, :purpose),
       last_seen: node.last_seen,
-      online: node.online,
+      online: online?(node, state, now),
       pending_messages: :queue.len(node.inbox)
     }
   end
