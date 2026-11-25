@@ -3,6 +3,10 @@
 AgentTalk stays an MCP broker with three tools. An optional host adapter supplies
 the missing step: start or queue an agent turn when its inbox has mail.
 
+The [cross-platform support plan](../docs/plan-platform-membership.md) defines
+shared membership recovery, credential handling, platform delivery candidates
+and the tests required before advertising Pi, Claude Code or Codex support.
+
 | Part | Responsibility |
 | --- | --- |
 | Elixir broker | Membership, ring isolation, queues, inbox metadata, operator UI. |
