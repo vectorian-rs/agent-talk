@@ -4,8 +4,9 @@ defmodule AgentTalk.Tools.Communicate do
   For send, supply message and either to (node IDs) or to_role (a role or all).
   Discovery, direct messages and broadcasts stay within your ring. Broadcasts exclude
   the sender. Receive takes only action, node_id and your private node token.
-  Authenticated calls renew only the caller's lease; sends do not renew recipients.
-  A send queues messages; recipient expiry can discard them before collection.
+  Authenticated calls update only the caller's presence; incoming mail does not
+  make an offline recipient online. Queued mail survives inactivity; explicit
+  eviction discards that member's inbox.
   Call receive between tasks to collect messages; use register_node for an idle heartbeat.
   When answering a specific message, set reply_to to its id so the answer can be
   matched to the task it resolves.

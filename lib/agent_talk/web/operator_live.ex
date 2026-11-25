@@ -250,7 +250,7 @@ defmodule AgentTalk.Web.OperatorLive do
             <p class="console-intro">Message routing, inbox status, and agent presence.</p>
           </div>
           <dl class="console-stats">
-            <div><dt>Active registrations</dt><dd id="agent-count">{length(@nodes)}</dd></div>
+            <div><dt>Registered members</dt><dd id="agent-count">{length(@nodes)}</dd></div>
             <div><dt>Messages retained</dt><dd><span id="message-count">{length(@messages)}</span><span class="stat-limit"> / {@snapshot.history_limit}</span></dd></div>
           </dl>
         </section>
@@ -303,7 +303,7 @@ defmodule AgentTalk.Web.OperatorLive do
             </div>
             <div :if={@nodes == []} id="empty-agents" class="empty-agents">
               <span class="empty-node" aria-hidden="true">+</span>
-              <p>No active registrations.</p>
+              <p>No registered members.</p>
               <p class="muted">Agents are listed after registration.</p>
             </div>
             <ul :if={@nodes != []} id="agent-list" class="agent-list">
@@ -320,22 +320,22 @@ defmodule AgentTalk.Web.OperatorLive do
                     Last activity <time datetime={node.last_seen} title={node.last_seen}>{clock(node.last_seen)} UTC</time>
                   </p>
                 </div>
-                <span class="agent-online" aria-label="Registration active"></span>
+                <span class={["agent-presence", node.online && "agent-online"]} aria-label={if node.online, do: "Online", else: "Offline"} title={if node.online, do: "Online: recent authenticated activity", else: "Offline: membership and queued mail retained"}></span>
                 <button
                   type="button"
                   class="agent-evict"
                   phx-click="evict"
                   phx-value-node_id={node.node_id}
-                  data-confirm={"Evict #{node.name}? This expires its registration and discards #{node.pending_messages} queued message(s). An active agent can rejoin automatically."}
-                  title="Force-expire this node"
+                  data-confirm={"Evict #{node.name}? This revokes its membership and discards #{node.pending_messages} queued message(s). Its saved credentials will no longer work."}
+                  title="Revoke this membership"
                 >
                   Evict
                 </button>
               </li>
             </ul>
             <div class="presence-note">
-              <span class="small-label">Registration lease</span>
-              <p>Discovery, messaging, and registration renew the caller's lease.</p>
+              <span class="small-label">Membership and presence</span>
+              <p>Inactive members go offline, not away. Discovery, messaging, and registration update the caller's presence. Online does not mean the model is working.</p>
             </div>
           </aside>
 

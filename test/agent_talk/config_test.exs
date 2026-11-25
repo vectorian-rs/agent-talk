@@ -5,11 +5,11 @@ defmodule AgentTalk.ConfigTest do
 
   @moduletag :tmp_dir
 
-  test "dev and prod use a 24-hour lease and retain 50 messages" do
+  test "dev and prod use 60-second presence and retain 50 messages" do
     for file <- ["config/dev.toml", "config/prod.toml"] do
       settings = Config.load!(file)
       assert settings[:port] == 4000
-      assert settings[:node_ttl_ms] == 86_400_000
+      assert settings[:presence_timeout_ms] == 60_000
       assert settings[:message_history_limit] == 50
       assert settings[:membership_file] == Path.expand("data/memberships.json")
       assert settings[:history_file] == Path.expand("data/history.sqlite3")
@@ -19,7 +19,8 @@ defmodule AgentTalk.ConfigTest do
   test "hub defaults use the loaded application settings" do
     hub = start_supervised!({Hub, name: nil})
     {:ok, node} = Hub.register(%{role: "pm"}, hub)
-    assert node.expires_in_seconds == 86_400
+    assert node.expires_in_seconds == nil
+    assert node.presence_timeout_seconds == 60
     assert {:ok, %{history_limit: 50}} = Hub.snapshot(hub)
   end
 
@@ -30,10 +31,18 @@ defmodule AgentTalk.ConfigTest do
       |> Config.load!()
 
     assert settings[:port] == 4100
-    assert settings[:node_ttl_ms] == 3_600_000
+    assert settings[:presence_timeout_ms] == 3_600_000
     assert settings[:message_history_limit] == 2
     assert settings[:allowed_origins] == ["http://localhost:4100", "http://127.0.0.1:4100"]
     assert settings[:membership_file] == Path.expand("../data/memberships.json", dir)
+  end
+
+  test "new presence setting is explicit and cannot be mixed with the legacy key", %{tmp_dir: dir} do
+    file = Path.join(dir, "presence.toml")
+    File.write!(file, "port = 4000\npresence_timeout_seconds = 15\nmessage_history_limit = 50\n")
+    assert Config.load!(file)[:presence_timeout_ms] == 15_000
+    File.write!(file, "node_ttl_seconds = 86400\n", [:append])
+    assert_raise ArgumentError, ~r/not both/, fn -> Config.load!(file) end
   end
 
   test "storage paths resolve relative to the TOML file", %{tmp_dir: dir} do

@@ -7,14 +7,14 @@ defmodule AgentTalk.Hub do
   # contract (sent to clients in structuredContent.error.code by
   # AgentTalk.tool_reply); the message is advisory prose, free to change.
   # Codes: :invalid_request, :invalid_labels, :invalid_ring_token,
-  # :invalid_token, :expired, :inbox_full, :storage.
+  # :invalid_token, :not_registered, :inbox_full, :storage.
   @labels_error "project, name and purpose must be nonempty labels of at most 128 characters without control characters"
 
   # Free-text display and discovery labels a caller sets on its own node, set at
   # register and updatable on list_nodes. purpose is the one line a searcher
   # reads to route by capability ("whoever does the deployments").
   @label_fields [:project, :name, :purpose]
-  @missing_node_error "node is not registered or has expired; join again with role and ring_token"
+  @missing_node_error "node is not registered or was revoked; ask the operator to restore membership"
   @invalid_token_error "invalid node token"
 
   # The inbox copy of a message. Recovery rebuilds exactly this shape from
@@ -85,9 +85,9 @@ defmodule AgentTalk.Hub do
         membership_file: Keyword.get(opts, :membership_file),
         history_file: Keyword.get(opts, :history_file),
         pubsub: Keyword.get(opts, :pubsub),
-        ttl_ms:
-          Keyword.get_lazy(opts, :ttl_ms, fn ->
-            Application.fetch_env!(:agent_talk, :node_ttl_ms)
+        presence_ms:
+          Keyword.get_lazy(opts, :presence_timeout_ms, fn ->
+            Application.fetch_env!(:agent_talk, :presence_timeout_ms)
           end),
         history_limit:
           Keyword.get_lazy(opts, :history_limit, fn ->
@@ -103,9 +103,9 @@ defmodule AgentTalk.Hub do
 
     with {:ok, saved} <- MembershipStore.load(state.membership_file),
          {:ok, db} <- History.open(state.history_file) do
-      # Expired memberships are gone after restore/3, so pending rows for the
-      # surviving IDs are exactly the queued mail lost at shutdown. A failed
-      # query stops startup; it must not fake empty inboxes.
+      # Restore mail only for registered identities, including offline members.
+      # Explicitly evicted IDs stay gone. A failed query stops startup; it must
+      # not fake empty inboxes.
       result =
         with {:ok, messages} <- History.recent(db, state.history_limit),
              {:ok, counter} <- History.last_counter(db),
@@ -149,7 +149,7 @@ defmodule AgentTalk.Hub do
     state
     |> Map.merge(%{saved | nodes: nodes})
     |> Map.merge(%{presence_dirty: false, presence_flushed_at: now})
-    |> expire_nodes(now)
+    |> refresh_presence(now)
   end
 
   defp inbox_message(event), do: Map.take(event, @message_fields)
@@ -179,7 +179,7 @@ defmodule AgentTalk.Hub do
   @impl true
   def handle_call(request, from, state) do
     now = state.clock.()
-    {reply, updated} = dispatch(request, expire_nodes(state, now), now)
+    {reply, updated} = dispatch(request, refresh_presence(state, now), now)
 
     case persist(state, updated, now) do
       {:ok, persisted} ->
@@ -216,7 +216,7 @@ defmodule AgentTalk.Hub do
   @impl true
   def handle_info(:sweep, state) do
     now = state.clock.()
-    updated = expire_nodes(state, now)
+    updated = refresh_presence(state, now)
     Process.send_after(self(), :sweep, sweep_interval(state))
 
     case persist(state, updated, now) do
@@ -235,30 +235,11 @@ defmodule AgentTalk.Hub do
   def handle_info({:timeout, timer, {:waiter_timeout, node_id}}, state) do
     case Map.get(state.waiters, node_id) do
       {_from, ^timer, _args} ->
-        # Expire first, as handle_call and :sweep do: a lease that lapsed while
-        # parked must not be revived by the timeout's renewing re-dispatch.
-        now = state.clock.()
-        expired = expire_nodes(state, now)
-
-        # On a failed write keep the removal in memory and mark it dirty so the
-        # next presence flush retries the write, rather than committing it with
-        # no later change to trigger a retry.
-        flushed =
-          case persist(state, expired, now) do
-            {:ok, persisted} -> persisted
-            {:error, _} -> %{expired | presence_dirty: true}
-          end
-
-        # Announce the expiry whenever the in-memory removal took effect, whether
-        # or not the write succeeded: once memory drops the node a later disk-only
-        # retry finds nothing changed and would never announce it. Compare against
-        # the expired state, not the woken one, so a healthy caller's lease
-        # renewal does not broadcast a presence-only change.
-        notify_if_changed(state, flushed)
-
-        # Release the parked caller against the expired state: a node whose own
-        # lease lapsed gets :expired with no renewing re-dispatch.
-        {:noreply, wake_waiter(flushed, node_id)}
+        # A returning long poll updates presence, never allocates a new identity.
+        # An explicitly evicted caller still receives not_registered.
+        updated = wake_waiter(state, node_id)
+        notify_if_changed(state, updated)
+        {:noreply, updated}
 
       _ ->
         {:noreply, state}
@@ -280,8 +261,8 @@ defmodule AgentTalk.Hub do
 
   # Waking is re-dispatch, not a second reply path: the stored args minus the
   # wait run back through the normal list pipeline (a node gone since parking
-  # yields the usual expired error), and only waited_seconds — the original
-  # grant, recomputed — is layered on top. The re-dispatch renews the lease,
+  # yields the usual not_registered error), and only waited_seconds — the original
+  # grant, recomputed — is layered on top. The re-dispatch updates presence,
   # a presence-only change, so it is deferred to the regular presence flush.
   # Label fields are dropped: they were applied when the request first arrived,
   # so replaying them would revert a renewal that landed while the caller parked.
@@ -309,7 +290,7 @@ defmodule AgentTalk.Hub do
           end
         )
 
-        # Only a successful wake renewed the lease; a gone node returns an error
+        # Only a successful wake updated presence; a gone node returns an error
         # with unchanged state, so it must not trigger a spurious presence flush.
         case reply do
           {:ok, _} -> %{updated | presence_dirty: true}
@@ -331,8 +312,8 @@ defmodule AgentTalk.Hub do
     end)
   end
 
-  # Expiry is also enforced on every call; the timer only covers idle servers.
-  defp sweep_interval(state), do: state.ttl_ms |> div(20) |> min(60_000) |> max(1000)
+  # Presence is also refreshed on every call; the timer covers idle servers.
+  defp sweep_interval(state), do: state.presence_ms |> div(20) |> min(60_000) |> max(1000)
 
   defp dispatch(:snapshot, state, _now) do
     pending =
@@ -361,7 +342,7 @@ defmodule AgentTalk.Hub do
     {{:ok, data}, state}
   end
 
-  # Drop a node exactly as a lease expiry would: its queued mail goes with it,
+  # Explicit revocation removes the node and its queued mail;
   # and handle_call's persist + broadcast then apply. Idempotent — an unknown or
   # already-gone id reports evicted: false and changes nothing.
   defp dispatch({:evict, node_id}, state, _now) do
@@ -488,15 +469,15 @@ defmodule AgentTalk.Hub do
 
   # Only waited requests gain waited_seconds; plain replies stay byte-identical
   # to a server without this feature. The clamp is the single authority on the
-  # grant: under common 30s proxy timeouts and at most half the lease, so a
-  # parked healthy node never expires mid-wait.
+  # grant: under common 30s proxy timeouts and half the presence interval, so
+  # repeated long polls keep presence current.
   defp effective_wait(args, state) do
     case Map.get(args, :wait_seconds) do
       nil ->
         {:ok, nil}
 
       seconds when is_integer(seconds) and seconds >= 0 ->
-        {:ok, min(wait_cap_ms(seconds), div(state.ttl_ms, 2))}
+        {:ok, min(wait_cap_ms(seconds), div(state.presence_ms, 2))}
 
       _ ->
         {:error, :invalid_request, "wait_seconds must be a non-negative integer"}
@@ -506,7 +487,7 @@ defmodule AgentTalk.Hub do
   defp renew_node(args, state, now) do
     case state.nodes[args.node_id] do
       nil ->
-        {{:error, :expired, @missing_node_error}, state}
+        {{:error, :not_registered, @missing_node_error}, state}
 
       node ->
         cond do
@@ -524,7 +505,7 @@ defmodule AgentTalk.Hub do
             node =
               node
               |> Map.merge(Map.take(args, @label_fields))
-              |> Map.merge(%{seen_at: now, last_seen: timestamp(state)})
+              |> Map.merge(%{seen_at: now, last_seen: timestamp(state), online: true})
 
             updated = put_in(state.nodes[node.node_id], node)
             {{:ok, registration(node, updated)}, updated}
@@ -564,6 +545,7 @@ defmodule AgentTalk.Hub do
       token: new_token(),
       inbox: :queue.new(),
       seen_at: now,
+      online: true,
       last_seen: timestamp(state)
     }
 
@@ -576,7 +558,8 @@ defmodule AgentTalk.Hub do
       Map.merge(public_node(node), %{
         token: node.token,
         ring_token: state.rings[node.ring_id],
-        expires_in_seconds: state.ttl_ms / 1000,
+        expires_in_seconds: nil,
+        presence_timeout_seconds: state.presence_ms / 1000,
         instructions: """
         Save this complete response privately before another call; never publish either token.
         Renew with role, node_id and token. Use list_nodes with node_id and token to discover
@@ -584,9 +567,12 @@ defmodule AgentTalk.Hub do
         or to_role, or receive your inbox when notified or between tasks. An optional host
         integration can check list_nodes.inbox and wake your session without draining mail.
         Without an integration, the operator resumes idle agents. Do not use LLM turns for
-        empty polling or start other agents. After expiry, join again with
-        role and ring_token, save the new identity, and reconcile work with the project record.
-        Ring tokens invite members; only your private node token authenticates your calls.
+        empty polling or start other agents. Membership does not expire from inactivity:
+        return with the same saved credentials even after going offline. Presence becomes
+        offline after the advertised timeout, but identity and queued mail remain.
+        If membership is missing or revoked, stop and ask the operator; do not create a ring
+        or silently replace your identity. Ring tokens invite members; only your private
+        node token authenticates your calls.
         """
       })
 
@@ -605,12 +591,17 @@ defmodule AgentTalk.Hub do
   defp authenticate(args, state, now) do
     case state.nodes[Map.get(args, :node_id)] do
       nil ->
-        {:error, :expired, @missing_node_error}
+        {:error, :not_registered, @missing_node_error}
 
       node ->
         if Map.get(args, :token) == node.token do
           updated =
-            put_in(state.nodes[node.node_id], %{node | seen_at: now, last_seen: timestamp(state)})
+            put_in(state.nodes[node.node_id], %{
+              node
+              | seen_at: now,
+                last_seen: timestamp(state),
+                online: true
+            })
 
           {:ok, node, updated}
         else
@@ -673,8 +664,8 @@ defmodule AgentTalk.Hub do
 
   # Read-only delivery visibility for the sender: its own recent sends still in
   # the history window, each with who has received it and who is still pending.
-  # Derives entirely from state.messages; mutates nothing (the lease was already
-  # renewed by authenticate/3).
+  # Derives entirely from state.messages; mutates nothing (presence was already
+  # updated by authenticate/3).
   defp communicate(%{action: "status"} = args, state, node) do
     if content_fields?(args) do
       {{:error, :invalid_request, "status takes no to, to_role, message or reply_to fields"},
@@ -712,7 +703,7 @@ defmodule AgentTalk.Hub do
           do: {:ok, ids},
           else:
             {:error, :invalid_request,
-             "unknown or expired recipients: #{Enum.join(missing, ", ")}"}
+             "unknown or revoked recipients: #{Enum.join(missing, ", ")}"}
 
       to == nil and valid_id?(role) ->
         ids =
@@ -829,7 +820,8 @@ defmodule AgentTalk.Hub do
 
   # Writing the membership file on every heartbeat would fsync once per
   # authenticated call, so presence-only changes (last_seen bumps) are flushed
-  # at most once per ttl/20; a restart loses at most that much lease activity.
+  # at most once per presence interval/20. A restart can slightly underreport
+  # recent presence but cannot remove an identity.
   defp persist(previous, updated, now) do
     cond do
       previous.rings != updated.rings or previous.next_id != updated.next_id ->
@@ -847,7 +839,7 @@ defmodule AgentTalk.Hub do
   end
 
   defp flush_presence(%{presence_dirty: true} = state, now) do
-    if now - state.presence_flushed_at >= div(state.ttl_ms, 20) do
+    if now - state.presence_flushed_at >= div(state.presence_ms, 20) do
       case save_now(state, now) do
         {:ok, flushed} ->
           {:ok, flushed}
@@ -892,8 +884,12 @@ defmodule AgentTalk.Hub do
     nodes |> Map.values() |> Enum.sort_by(& &1.node_id) |> Enum.map(&public_node/1)
   end
 
-  defp expire_nodes(state, now) do
-    nodes = Map.reject(state.nodes, fn {_id, node} -> now - node.seen_at >= state.ttl_ms end)
+  defp refresh_presence(state, now) do
+    nodes =
+      Map.new(state.nodes, fn {id, node} ->
+        {id, Map.put(node, :online, now - node.seen_at < state.presence_ms)}
+      end)
+
     %{state | nodes: nodes}
   end
 
@@ -913,6 +909,7 @@ defmodule AgentTalk.Hub do
       project: Map.get(node, :project),
       purpose: Map.get(node, :purpose),
       last_seen: node.last_seen,
+      online: node.online,
       pending_messages: :queue.len(node.inbox)
     }
   end

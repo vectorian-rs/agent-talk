@@ -13,7 +13,7 @@ defmodule AgentTalk.HistoryTest do
 
     opts = [
       name: nil,
-      ttl_ms: 86_400_000,
+      presence_timeout_ms: 86_400_000,
       history_limit: 2,
       membership_file: Path.join(dir, "memberships.json"),
       history_file: Path.join(dir, "history.sqlite3"),

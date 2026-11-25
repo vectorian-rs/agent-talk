@@ -1,7 +1,7 @@
 defmodule AgentTalk.Config do
   @moduledoc "Loads and validates server settings from a TOML file."
 
-  @keys ~w(port node_ttl_seconds message_history_limit allowed_origins membership_file history_file)
+  @keys ~w(port presence_timeout_seconds node_ttl_seconds message_history_limit allowed_origins membership_file history_file)
 
   def path(argv, default) do
     {options, _rest, invalid} = OptionParser.parse(argv, strict: [config: :string])
@@ -23,7 +23,18 @@ defmodule AgentTalk.Config do
 
     port = positive_integer!(data, "port")
     if port > 65_535, do: raise(ArgumentError, "port must be 1..65535")
-    ttl_seconds = positive_integer!(data, "node_ttl_seconds")
+
+    if Map.has_key?(data, "presence_timeout_seconds") and Map.has_key?(data, "node_ttl_seconds") do
+      raise ArgumentError,
+            "use presence_timeout_seconds, not both presence and legacy node_ttl_seconds"
+    end
+
+    presence_key =
+      if Map.has_key?(data, "presence_timeout_seconds"),
+        do: "presence_timeout_seconds",
+        else: "node_ttl_seconds"
+
+    presence_seconds = positive_integer!(data, presence_key)
     history_limit = positive_integer!(data, "message_history_limit")
     membership_file = Map.get(data, "membership_file", "../data/memberships.json")
     history_file = Map.get(data, "history_file", "../data/history.sqlite3")
@@ -45,7 +56,7 @@ defmodule AgentTalk.Config do
 
     [
       port: port,
-      node_ttl_ms: ttl_seconds * 1000,
+      presence_timeout_ms: presence_seconds * 1000,
       message_history_limit: history_limit,
       membership_file: Path.expand(membership_file, Path.dirname(Path.expand(file))),
       history_file: Path.expand(history_file, Path.dirname(Path.expand(file))),

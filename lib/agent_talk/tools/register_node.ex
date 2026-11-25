@@ -2,8 +2,9 @@ defmodule AgentTalk.Tools.RegisterNode do
   @moduledoc """
   A PM starts a ring with role=pm and receives its ring_token and onboarding template.
   Other agents join with their role and that ring_token; the server assigns unique IDs.
-  Renew with role, node_id and your private token. After expiry, join again with role
-  and ring_token for a new identity. Save every successful response and follow its instructions.
+  Resume with role, node_id and your private token even after going offline.
+  Membership does not expire from inactivity. Missing or revoked membership requires
+  the operator. Save every successful response and follow its instructions.
   An optional purpose line advertises what you do, so peers can find you by capability in list_nodes.
   """
   use Anubis.Server.Component, type: :tool, name: "register_node"

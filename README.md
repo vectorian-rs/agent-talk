@@ -114,8 +114,9 @@ The extension waits for the registration file. Paste:
 ```text
 Follow this session's existing instructions as PM, with automatic inbox handling.
 Renew the membership in .agent-talk/pm.json using role, node_id and token.
-Create a ring with role=pm only if no saved membership exists. After expiry,
-rejoin with its role and ring_token; an invalid invitation needs the operator.
+Create a ring with role=pm only if no saved membership exists. Inactivity does
+not expire membership. If saved membership is missing or revoked, ask the operator;
+do not silently rejoin or create a replacement ring.
 Save each complete successful response to that file under the shared rules.
 
 Prepare private invitations from the returned template for w-1 and w-2,
@@ -182,7 +183,7 @@ host checks and does not prove the model is working.
 Reuse saved files to resume; use fresh files for a new team. Never share one
 membership between live agents or fork the PM to create workers. Server restarts
 preserve rings and registrations; leave agents running and Pi reconnects
-automatically. Lease time includes downtime. With the conversation archive
+automatically. Inactivity and downtime affect presence, not membership. With the conversation archive
 enabled, queued mail a recipient has not collected is restored at startup;
 without it, inboxes are memory only, so recover unfinished work from the
 project record. Message history is archived
@@ -200,10 +201,11 @@ continue; your next prompt or `on` resumes them. Only `off` persists a disable.
 | Old tool schema | `/mcp reconnect agent-talk`; `/reload` after MCP config or extension updates. |
 | Unread mail | Check the extension, matching credential path and notification-handling prompt. Three wake-ups for the same unread message produce a stalled status. |
 | Lost connection | The host retries with backoff without model turns. |
-| Expired registration | Rejoin with saved role/ring invitation, save the new identity, rediscover and notify peers, then reconcile work. |
-| `invalid node token` | Reload credentials; if lost, rejoin as a new identity. Another node's token cannot be reclaimed. |
+| Offline member | Resume using the same saved identity; authenticated activity makes it online again. |
+| Missing/revoked membership | Stop and ask the operator. Do not silently rejoin. Old IDs already removed by an earlier server cannot be recovered by this upgrade. |
+| `invalid node token` | Reload the correct credentials. If lost or exposed, ask the operator to revoke and explicitly replace that membership. |
 | `invalid ring token` | Check the server and its membership file. A lost/deleted store needs a new PM ring and worker invitations; client files cannot restore it. |
-| Unknown/expired recipient | Rediscover and confirm its identity before resending. Rejected sends queue nothing. |
+| Unknown/revoked recipient | Rediscover and confirm its identity before resending. Rejected sends queue nothing. |
 
 ## Claude Code inbox hook
 
@@ -265,7 +267,9 @@ Credentials are placeholders; server instruction text is abbreviated.
   "role": "pm",
   "token": "<PM_PRIVATE_TOKEN>",
   "ring_token": "<SHARED_RING_INVITATION>",
-  "expires_in_seconds": 86400,
+  "expires_in_seconds": null,
+  "presence_timeout_seconds": 60,
+  "online": true,
   "last_seen": "2026-11-08T12:00:00Z",
   "pending_messages": 0,
   "instructions": "<SERVER_INSTRUCTIONS>",
@@ -282,7 +286,9 @@ Credentials are placeholders; server instruction text is abbreviated.
   "role": "worker",
   "token": "<WORKER_PRIVATE_TOKEN>",
   "ring_token": "<SHARED_RING_INVITATION>",
-  "expires_in_seconds": 86400,
+  "expires_in_seconds": null,
+  "presence_timeout_seconds": 60,
+  "online": true,
   "last_seen": "2026-11-08T12:00:00Z",
   "pending_messages": 0,
   "instructions": "<SERVER_INSTRUCTIONS>"
@@ -300,7 +306,7 @@ Development defaults to `config/dev.toml`; production builds to `config/prod.tom
 
 ```toml
 port = 4000
-node_ttl_seconds = 86400
+presence_timeout_seconds = 60
 message_history_limit = 50
 membership_file = "../data/memberships.json"
 history_file = "../data/history.sqlite3"
@@ -308,11 +314,16 @@ history_file = "../data/history.sqlite3"
 
 Select with `--config`. Choosing `prod.toml` does not change the build mode.
 Numeric settings must be positive integers; ports are 1..65535. Invalid or unknown
-settings stop startup. The startup log reports version, config, lease, history
-limit, membership file and conversation archive.
+settings stop startup. The startup log reports version, config, presence timeout,
+history limit, membership file and conversation archive.
+
+`presence_timeout_seconds` controls when an inactive member is shown offline;
+it never deletes membership or inboxes. The legacy `node_ttl_seconds` key is
+accepted as a presence-timeout alias so existing configs still start. Do not
+specify both. Existing config values remain unchanged until explicitly edited.
 
 `membership_file` resolves relative to the TOML file. The default private
-`data/memberships.json` stores rings, credentials, labels, lease activity and the
+`data/memberships.json` stores rings, credentials, labels, last activity and the
 ID counter, using atomic replacements with mode `0600`. Keep it across restarts,
 back it up privately and use a separate file for each server. An unreadable or
 corrupt store stops startup; failed writes reject the operation. The default
@@ -339,7 +350,7 @@ Recording starts when this version is activated. Previously lost in-memory histo
 cannot be reconstructed, and the first activating restart cannot restore mail that
 was never archived. From then on, with the archive enabled, a message acknowledged with
 `delivered_to` is either collected (a receive removed it, even if that
-response was lost in transit) or discarded by its recipient's expiry — never
+response was lost in transit) or discarded by explicit recipient eviction — never
 dropped by a hub restart.
 Archive retention is independent of the UI limit and has no automatic deletion.
 
@@ -351,24 +362,40 @@ localhost/127.0.0.1 at that port; `allowed_origins` overrides them. Requests wit
 `Origin` are accepted. The UI secret is generated at startup. Remote access needs
 authenticated HTTPS and an appropriate origin allowlist.
 
-- Rings, unexpired registrations and archived conversations survive restarts.
-  With the archive enabled, queued uncollected mail is restored for surviving
+- Rings, registered identities and archived conversations survive restarts.
+  With the archive enabled, queued uncollected mail is restored even for offline
   members and shows as `Queued`; without it, live inboxes are memory only.
-- Membership survival is approximate near expiry: lease activity is written at
-  most every `ttl/20`, so a node last seen just before a crash can still expire
-  at startup and its queued mail is discarded with it.
-- Expiry discards inboxes. Receive removes mail before the response, so failures
-  can lose it. Keep durable tasks/results in your project's record.
+- Presence timestamps are periodically flushed, so a crash can slightly
+  underreport recent activity. It cannot expire an identity or discard its mail.
+- Explicit eviction revokes membership and discards its inbox. Receive removes
+  mail before the response, so failures can lose it. Keep durable tasks/results
+  in your project's record. Offline inboxes are still subject to capacity limits.
 - Each inbox holds 1,000 messages; messages are at most 65,536 UTF-8 bytes.
 - UI history defaults to the last 50 successful sends across rings. A broadcast
   is one entry. This bounds the live window, not the SQLite archive.
+
+### Upgrading an existing server
+
+Back up `memberships.json` and the conversation archive privately before an
+operator-approved restart. The existing version-1 membership store is read
+without a format migration: all identities still present in it are retained,
+including members whose last activity is older than the presence timeout.
+Saved client credentials do not need to be replaced. Identities already deleted
+by an older server cannot be resurrected; resolve those individually with the
+operator rather than resetting the ring. An older server used for rollback
+would enforce its old expiry policy again, so do not downgrade blindly.
+
+Registration now returns `expires_in_seconds: null` and a separate
+`presence_timeout_seconds`. Clients should pace heartbeats from the latter.
+`list_nodes` includes offline members and exposes `online`; use that field when
+selecting currently reachable agents, not membership existence alone.
 
 ## MCP reference
 
 | Tool | Arguments |
 | --- | --- |
 | `register_node` | Create: `{"role":"pm"}`. Join: `{"role":"worker","ring_token":"<INVITATION>"}`. Renew: `{"role":"worker","node_id":"<ID>","token":"<PRIVATE_TOKEN>"}`. Optional `project` and `name` supply display labels. |
-| `list_nodes` | Own `node_id`/`token` and optional `role` filter. Returns active ring members and the caller's `inbox` metadata without consuming mail. Optional `project` and `name` update only the caller's labels. |
+| `list_nodes` | Own `node_id`/`token` and optional `role` filter. Returns registered ring members (with `online` presence) and the caller's `inbox` metadata without consuming mail. Optional `project` and `name` update only the caller's labels. |
 | `communicate` | Own `node_id`/`token` and `action`. Send: `message` and either `to: ["<ID>", ...]` or `to_role`. Receive: no send fields; drains the FIFO inbox. |
 
 Clients wrap these arguments in `tools/call`. Broadcasts exclude the sender;
@@ -378,14 +405,17 @@ inside the ring. Invalid recipients or full inboxes reject the entire fan-out.
 Save every complete registration via a same-directory temporary file, mode `0600`,
 then rename over the previous file. Roles use 1..64 letters, digits, underscores,
 dots or hyphens; `all` is reserved. Roles confer no authorization or human approval.
-The saved ID counter prevents reuse across restarts, including after expiry.
+The saved ID counter prevents reuse across restarts, including after eviction.
 Tokens hash 32 random bytes with SHA-256.
 
-Authenticated discovery, communication and renewal refresh only the caller's
-lease, even if discovery/communication later fail validation. Incoming mail and
-open connections do not. Renewal preserves ID, tokens, ring and inbox, and cannot
-change role/ring. Invitations survive member expiry and server restarts while
-the membership file is retained.
+Authenticated discovery, communication and renewal update only the caller's
+presence, even if discovery/communication later fail validation. Incoming mail
+and open connections do not prove recipient activity. Membership itself has no
+inactivity deadline. Resume preserves ID, tokens, ring and inbox, and cannot
+change role/ring. Invitations and identities survive restarts while the
+membership file is retained. Online means recent authenticated contact, not that
+the model is working. `not_registered` means absent or explicitly revoked, not
+offline; `invalid_token` means authentication failed.
 A fresh role-only PM call creates another ring.
 
 `inbox` contains `pending_messages` and `next_message_id` (null when empty), even
@@ -402,7 +432,7 @@ These developer checks are not required to onboard a real team:
 | Script | Purpose |
 | --- | --- |
 | `examples/demo.exs` | Scripted PM/two-worker exchange, isolated by default. `--url http://127.0.0.1:4000` uses a separate demo ring on an existing server. |
-| `examples/lease_smoke.exs` | Isolated short-lease registration, renewal, expiry, rejoining, delivery and ring-isolation checks. |
+| `examples/lease_smoke.exs` | Isolated durable-membership, offline presence, return, mail retention, revocation and ring-isolation checks. |
 | `examples/pi_smoke.exs` | Three real Pi processes exchange messages before and after an isolated server process restart, using unchanged credentials; no paid model calls or trial-server access. |
 
 From the AgentTalk checkout:

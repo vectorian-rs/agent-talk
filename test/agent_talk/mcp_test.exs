@@ -68,7 +68,8 @@ defmodule AgentTalk.MCPTest do
 
     assert same_credentials, "renewal must return complete, unchanged credentials"
     assert renewed["node_id"] == pm["node_id"]
-    assert renewed["expires_in_seconds"] == 86_400
+    assert renewed["expires_in_seconds"] == nil
+    assert renewed["presence_timeout_seconds"] == 60
 
     sent =
       call(
@@ -207,7 +208,7 @@ defmodule AgentTalk.MCPTest do
                to: [worker["node_id"], outsider["node_id"]],
                message: "Mixed"
              })
-           ) =~ "unknown or expired recipients"
+           ) =~ "unknown or revoked recipients"
 
     assert call(name, "communicate", auth(worker, %{action: "receive"}))["messages"] == []
 
@@ -226,7 +227,7 @@ defmodule AgentTalk.MCPTest do
     for {args, code} <- [
           {%{role: "worker", ring_token: "wrong"}, "invalid_ring_token"},
           {%{role: "pm", node_id: pm["node_id"], token: "wrong"}, "invalid_token"},
-          {%{role: "pm", node_id: "node-999999", token: "wrong"}, "expired"},
+          {%{role: "pm", node_id: "node-absent", token: "wrong"}, "not_registered"},
           {%{role: "pm", name: "\n"}, "invalid_labels"},
           {%{role: "all"}, "invalid_request"}
         ] do

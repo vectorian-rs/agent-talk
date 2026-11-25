@@ -176,6 +176,23 @@ defmodule AgentTalk.OperatorLiveTest do
     refute has_element?(view, "#agent-#{pm.node_id} .agent-purpose")
   end
 
+  test "an offline member remains visible and returns online with the same identity" do
+    pm = register(%{role: "pm", project: "hiko", name: "hiko / pm"})
+    {:ok, view, _} = live(build_conn(), "/")
+    assert has_element?(view, "#agent-#{pm.node_id} [aria-label='Online']")
+
+    :sys.replace_state(Hub, fn state ->
+      put_in(state.nodes[pm.node_id].seen_at, state.clock.() - state.presence_ms)
+    end)
+
+    send(Hub, :sweep)
+    :sys.get_state(Hub)
+    assert has_element?(view, "#agent-#{pm.node_id} [aria-label='Offline']")
+    assert has_element?(view, "#agent-count", "1")
+    assert {:ok, _} = Hub.list_nodes(auth(pm, %{}))
+    assert has_element?(view, "#agent-#{pm.node_id} [aria-label='Online']")
+  end
+
   test "the operator evicts an agent, removing it from the live view" do
     pm = register(%{role: "pm", project: "hiko", name: "hiko / pm"})
     worker = join(pm, "hiko / w-1")
