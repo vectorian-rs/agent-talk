@@ -22,9 +22,8 @@ remain in effect. Never enable blanket permission bypass to make a smoke pass.
 - The Claude work in PR #20 prepares files and a native launch command. Its hooks
   detect expiry but leave recovery to the model. This is not reliable automatic
   support. The model reading credentials also caused a transcript exposure.
-- Claude /loop can schedule inbox checks, but spends model turns on empty inboxes
-  and has scheduler lifetime/resume limitations. It is an explicit compatibility
-  mode, not equivalent to a host-side watcher.
+- Claude /loop exists only as a polling fallback (see Claude Code below), not as an
+  equivalent to a host-side watcher.
 - There is no completed Codex adapter.
 - Live users have executed scripts from a mutable development checkout. Switching
   branches changed their CLI. Installation isolation is part of correctness.
@@ -68,7 +67,6 @@ Use the existing `.agent-talk/<team>/` directory:
 
 The stable local identity is the explicit server, ring and logical label. A
 server node_id identifies a durable registration until explicit revocation.
-Inactivity and downtime never allocate a replacement identity.
 Display labels are not authentication and cannot prove a sender's identity.
 Client session/thread IDs are separate from AgentTalk node IDs and must be bound
 through supported client APIs, never guessed from recent transcript files.
@@ -146,10 +144,10 @@ both file tools and shell access. Mode 0600 alone does not isolate secrets from
 the model's own user account. Report that limitation instead of claiming a
 stronger security boundary.
 
-Use the same shared lifecycle module behind the facade, recovery helper and
-watcher. Establish one writer/owner for the membership; do not let a monitor and
-a tool call race to update or replace it. Test the facade and ownership boundary before
-removing raw authenticated MCP access from existing setups.
+The facade, recovery helper and watcher all use the shared lifecycle module. Establish
+one writer/owner for the membership; do not let a monitor and a tool call race to
+update or replace it. Test the facade and ownership boundary before removing raw
+authenticated MCP access from existing setups.
 
 Treat a token printed in a transcript as exposed. Do not echo it during diagnosis.
 Revoke/replace an active exposed identity through the explicit recovery path and
@@ -213,7 +211,7 @@ Never label a connection 'ready' solely because initialize or list_nodes passed.
 
 1. Durable broker membership with separate presence and safe error codes (PR #24).
    Then shared host-side lifecycle, join idempotency, locks and atomic-write
-   failure tests. No model involvement; no automatic rejoin for missing identities.
+   failure tests. No model involvement.
 2. Credential-bound tools plus add/resume/status. Test simulated credential-read
    denial; it must not affect host-side recovery. Install a versioned runtime
    outside mutable development worktrees; printed commands refer to that runtime.
@@ -228,9 +226,8 @@ Never label a connection 'ready' solely because initialize or list_nodes passed.
 For every supported client test:
 
 - Add to the chosen ring without counts or TOML, preserving all existing agents.
-- Delay launch past the presence timeout; resume with the same ID and credentials
-  without reading/printing secrets through the model.
-- Multiple days offline, queued mail retained, and return with the same identity.
+- Delay launch past the presence timeout, and stay offline for multiple days: same
+  ID and credentials, queued mail retained, no secrets read or printed through the model.
 - Broker restart before/after the presence timeout, and server offline/back online.
 - Explicit eviction invalidates saved credentials and requires operator action.
 - Invalid token, invitation, role/server/ring mismatch and corrupt private JSON.
@@ -251,5 +248,3 @@ For every supported client test:
 - https://code.claude.com/docs/en/channels.md
 - `codex queue --help` and `codex app-server --help` on the installed version.
 - This repository's integration contract and real-Pi smoke acceptance description.
-
-Native capabilities are candidates until tested, not claims of completed support.
