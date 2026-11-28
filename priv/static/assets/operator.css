@@ -11,10 +11,11 @@
   .header-actions { display: flex; align-items: center; gap: 1.25rem; }
   .operator-label { color: var(--muted); }
   .connection-status { display: flex; align-items: center; gap: .5rem; font: .75rem var(--mono); }
-  .connection-dot, .agent-online { flex: none; width: .4rem; height: .4rem; border-radius: 50%; background: var(--muted); }
+  .connection-dot, .agent-presence { flex: none; width: .4rem; height: .4rem; border-radius: 50%; background: var(--muted); }
   .connection-status.is-connected .connection-dot { background: var(--online); box-shadow: 0 0 0 4px var(--online-bg); }
   .connection-status.is-disconnected { color: var(--muted); }
-  .agent-online { background: var(--online); margin-top: .45rem; }
+  .agent-presence { margin-top: .45rem; }
+  .agent-online { background: var(--online); }
   .agent-evict { flex: none; align-self: flex-start; margin-left: .25rem; padding: .15rem .5rem; font-size: .6rem; color: var(--muted); background: transparent; border: 1px solid var(--line); border-radius: 4px; cursor: pointer; }
   .agent-evict:hover { color: var(--drawing); border-color: var(--drawing); }
   .operator-error { margin: .75rem auto; max-width: var(--wrap, 72rem); padding: .6rem .9rem; font-size: .8rem; color: var(--assumption-ink, #b42318); background: var(--assumption-bg, #fef3f2); border: 1px solid var(--assumption-line, #f5c2c0); border-radius: 6px; cursor: pointer; }

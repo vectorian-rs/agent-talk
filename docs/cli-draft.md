@@ -1,5 +1,10 @@
 # CLI draft
 
+Historical prototype notes below describe lease-expiry recovery. The current
+server instead retains membership across inactivity and reports offline presence;
+missing or revoked membership requires an operator. See the README for the
+current membership contract.
+
 Branch: `fix/cli-transport-only`. The separate worktree contains this revision; the
 running checkout and server remain unchanged. This is an initial prototype,
 not the supported onboarding path yet.

@@ -8,7 +8,11 @@ defmodule AgentTalk.HubTest do
 
     hub =
       start_supervised!(
-        {Hub, name: nil, ttl_ms: 1000, max_inbox: 2, clock: fn -> Agent.get(clock, & &1) end}
+        {Hub,
+         name: nil,
+         presence_timeout_ms: 1000,
+         max_inbox: 2,
+         clock: fn -> Agent.get(clock, & &1) end}
       )
 
     %{hub: hub, clock: clock, pm: register(hub, %{role: "pm"})}
@@ -20,7 +24,8 @@ defmodule AgentTalk.HubTest do
     assert pm.role == "pm"
     assert is_binary(pm.node_id)
     assert is_binary(pm.ring_id)
-    assert pm.expires_in_seconds == 1
+    assert pm.expires_in_seconds == nil
+    assert pm.presence_timeout_seconds == 1
     assert pm.onboarding_prompt_template =~ "<ROLE>"
     assert pm.onboarding_prompt_template =~ "<RING_TOKEN>"
     assert pm.instructions =~ "Save this complete response"
@@ -98,7 +103,7 @@ defmodule AgentTalk.HubTest do
              Hub.register(%{role: "worker", ring_token: pm.ring_token, purpose: "\t"}, hub)
   end
 
-  test "invalid labels are rejected and message history retains names after expiry", %{
+  test "invalid labels are rejected and message history retains names while offline", %{
     hub: hub,
     clock: clock
   } do
@@ -119,7 +124,9 @@ defmodule AgentTalk.HubTest do
     assert {:error, _, _} = Hub.list_nodes(auth(worker, %{project: "\n"}), hub)
     assert {:ok, _} = send_message(hub, pm, %{to: [worker.node_id], message: "Task"})
     Agent.update(clock, fn _ -> 1000 end)
-    assert {:ok, %{nodes: [], messages: [event]}} = Hub.snapshot(hub)
+    assert {:ok, %{nodes: nodes, messages: [event]}} = Hub.snapshot(hub)
+    assert length(nodes) == 3
+    assert Enum.all?(nodes, &(not &1.online))
     assert event.project == "hiko"
     assert event.from_name == "hiko / pm"
     assert event.to_names == %{worker.node_id => "hiko / w-1"}
@@ -281,18 +288,107 @@ defmodule AgentTalk.HubTest do
     assert from == pm.node_id
   end
 
-  test "unknown recipients and inbox capacity reject the whole broadcast", %{hub: hub, pm: pm} do
-    worker = join(hub, pm)
-    other = join(hub, pm)
+  test "explicit recipients remain atomic and full-inbox errors name every blocker", %{
+    hub: hub,
+    pm: pm
+  } do
+    full =
+      for name <- ["w-3", "w-4"],
+          do: register(hub, %{role: "worker", ring_token: pm.ring_token, name: name})
 
-    assert {:error, _, _} =
-             send_message(hub, pm, %{to: [worker.node_id, "missing"], message: "Task"})
+    available = join(hub, pm)
+
+    assert {:error, :invalid_request, _} =
+             send_message(hub, pm, %{to: [available.node_id, "missing"], message: "Unknown"})
+
+    for worker <- full, text <- ["One", "Two"] do
+      assert {:ok, _} = send_message(hub, pm, %{to: [worker.node_id], message: text})
+    end
+
+    assert {:error, :inbox_full, error} =
+             send_message(hub, pm, %{
+               to: [available.node_id | Enum.map(full, & &1.node_id)],
+               message: "Atomic"
+             })
+
+    for worker <- full, do: assert(error =~ "#{worker.name} (#{worker.node_id})")
+    assert error =~ "no messages were delivered"
+    assert {:ok, %{messages: []}} = receive_messages(hub, available)
+
+    for worker <- full do
+      assert {:ok, %{messages: [%{message: "One"}, %{message: "Two"}]}} =
+               receive_messages(hub, worker)
+    end
+  end
+
+  for target <- ["worker", "all"] do
+    test "role #{target} skips full offline inboxes without blocking other recipients", %{
+      hub: hub,
+      clock: clock,
+      pm: pm
+    } do
+      full = register(hub, %{role: "worker", ring_token: pm.ring_token, name: "w-3"})
+      available = join(hub, pm)
+      for text <- ["One", "Two"], do: send_message(hub, pm, %{to: [full.node_id], message: text})
+      Agent.update(clock, fn _ -> 30 * 86_400_000 end)
+      full_id = full.node_id
+      available_id = available.node_id
+
+      assert {:ok,
+              %{
+                message_id: id,
+                delivered_to: [^available_id],
+                skipped: [%{node_id: ^full_id, name: "w-3", reason: "inbox_full"}]
+              }} = send_message(hub, pm, %{to_role: unquote(target), message: "New task"})
+
+      assert {:ok, %{messages: [%{id: ^id, to: [^available_id], to_names: names} | _]}} =
+               Hub.snapshot(hub)
+
+      assert Map.keys(names) == [available_id]
+      assert {:ok, %{sent: [latest | _]}} = Hub.communicate(auth(pm, %{action: "status"}), hub)
+      assert latest.to == [available_id]
+      assert latest.pending == [available_id]
+      assert {:ok, %{messages: [%{id: ^id}]}} = receive_messages(hub, available)
+
+      assert {:ok, %{messages: [%{message: "One"}, %{message: "Two"}]}} =
+               receive_messages(hub, full)
+
+      assert {:ok, %{messages: []}} = receive_messages(hub, full)
+    end
+  end
+
+  test "a role send with every inbox full fails without creating a message", %{hub: hub, pm: pm} do
+    worker = register(hub, %{role: "worker", ring_token: pm.ring_token, name: "w-3"})
+    for text <- ["One", "Two"], do: send_message(hub, pm, %{to: [worker.node_id], message: text})
+    assert {:ok, %{messages: before}} = Hub.snapshot(hub)
+
+    assert {:error, :inbox_full, error} =
+             send_message(hub, pm, %{to_role: "worker", message: "Nobody gets this"})
+
+    assert error =~ "w-3 (#{worker.node_id})"
+    assert error =~ "no messages were delivered"
+    assert {:ok, %{messages: ^before}} = Hub.snapshot(hub)
+
+    assert {:ok, %{messages: [%{message: "One"}, %{message: "Two"}]}} =
+             receive_messages(hub, worker)
 
     assert {:ok, %{messages: []}} = receive_messages(hub, worker)
+  end
+
+  test "offline inbox capacity still rejects new mail without deleting accepted mail", %{
+    hub: hub,
+    clock: clock,
+    pm: pm
+  } do
+    worker = join(hub, pm)
     for text <- ["One", "Two"], do: send_message(hub, pm, %{to: [worker.node_id], message: text})
-    assert {:error, _, _} = send_message(hub, pm, %{to_role: "worker", message: "Three"})
-    assert {:ok, %{messages: []}} = receive_messages(hub, other)
-    assert {:ok, %{messages: [_, _]}} = receive_messages(hub, worker)
+    Agent.update(clock, fn _ -> 100_000 end)
+
+    assert {:error, :inbox_full, _} =
+             send_message(hub, pm, %{to: [worker.node_id], message: "Rejected"})
+
+    assert {:ok, %{messages: [%{message: "One"}, %{message: "Two"}]}} =
+             receive_messages(hub, worker)
   end
 
   test "invalid targeting and messages do not deliver", %{hub: hub, pm: pm} do
@@ -456,19 +552,22 @@ defmodule AgentTalk.HubTest do
     refute Enum.any?(nodes, &(&1.node_id == worker.node_id))
     assert Enum.any?(nodes, &(&1.node_id == other.node_id)), "eviction is scoped to its target"
 
-    assert {:error, :expired, _} = Hub.list_nodes(auth(worker), hub)
+    assert {:error, :not_registered, _} = Hub.list_nodes(auth(worker), hub)
 
     # Idempotent: re-evicting or evicting an unknown id is a safe no-op.
     assert {:ok, %{evicted: false}} = Hub.evict(worker.node_id, hub)
     assert {:ok, %{evicted: false}} = Hub.evict("node-999999", hub)
   end
 
-  test "evicting a node releases its parked long-poll waiter as expired", %{hub: hub, pm: pm} do
+  test "evicting a node releases its parked long-poll waiter as not registered", %{
+    hub: hub,
+    pm: pm
+  } do
     worker = join(hub, pm)
     parked = Task.async(fn -> Hub.list_nodes(auth(worker, %{wait_seconds: 10}), hub) end)
     await_waiter(hub, worker.node_id)
     assert {:ok, %{evicted: true}} = Hub.evict(worker.node_id, hub)
-    assert {:error, :expired, _} = Task.await(parked, 1000)
+    assert {:error, :not_registered, _} = Task.await(parked, 1000)
     assert :sys.get_state(hub).waiters == %{}
   end
 
@@ -493,6 +592,39 @@ defmodule AgentTalk.HubTest do
     assert {:ok, %{messages: []}} = receive_messages(hub, outsider), "scoped to the one ring"
   end
 
+  test "an operator broadcast skips full members but still wakes available watchers", %{
+    hub: hub,
+    pm: pm
+  } do
+    worker = register(hub, %{role: "worker", ring_token: pm.ring_token, name: "w-3"})
+    other_pm = register(hub, %{role: "pm"})
+    for text <- ["One", "Two"], do: send_message(hub, pm, %{to: [worker.node_id], message: text})
+    task = Task.async(fn -> Hub.list_nodes(auth(pm, %{wait_seconds: 10}), hub) end)
+    await_waiter(hub, pm.node_id)
+    pm_id = pm.node_id
+    worker_id = worker.node_id
+
+    assert {:ok, %{message_id: id, delivered_to: [^pm_id], skipped: [skipped]}} =
+             Hub.broadcast(pm.ring_id, "Partial announcement", hub)
+
+    assert skipped == %{node_id: worker_id, name: "w-3", reason: "inbox_full"}
+    assert {:ok, %{inbox: %{pending_messages: 1}}} = Task.await(task)
+    assert {:ok, %{messages: [%{id: ^id}]}} = receive_messages(hub, pm)
+    assert {:ok, %{messages: []}} = receive_messages(hub, other_pm)
+
+    assert {:ok, %{messages: [%{message: "One"}, %{message: "Two"}]}} =
+             receive_messages(hub, worker)
+  end
+
+  test "an operator broadcast fails when every member is full", %{hub: hub, pm: pm} do
+    for text <- ["One", "Two"], do: send_message(hub, pm, %{to: [pm.node_id], message: text})
+    assert {:ok, %{messages: before}} = Hub.snapshot(hub)
+    assert {:error, :inbox_full, error} = Hub.broadcast(pm.ring_id, "Not delivered", hub)
+    assert error =~ pm.node_id
+    assert error =~ "no messages were delivered"
+    assert {:ok, %{messages: ^before}} = Hub.snapshot(hub)
+  end
+
   test "an operator broadcast wakes a parked long-poll watcher immediately", %{hub: hub, pm: pm} do
     worker = join(hub, pm)
     parked = Task.async(fn -> Hub.list_nodes(auth(worker, %{wait_seconds: 10}), hub) end)
@@ -511,7 +643,7 @@ defmodule AgentTalk.HubTest do
            "a rejected broadcast delivers nothing"
   end
 
-  test "a long-poll timeout does not revive a node whose lease expired while parked", %{
+  test "a long-poll return after the presence timeout preserves membership", %{
     hub: hub,
     clock: clock,
     pm: pm
@@ -521,15 +653,15 @@ defmodule AgentTalk.HubTest do
     await_waiter(hub, worker.node_id)
     {_from, timer, _args} = :sys.get_state(hub).waiters[worker.node_id]
 
-    # Lease lapses while parked, then the park's timeout fires.
     Agent.update(clock, fn _ -> 1001 end)
     send(hub, {:timeout, timer, {:waiter_timeout, worker.node_id}})
 
-    assert {:error, :expired, _} = Task.await(parked, 1000)
-    refute Map.has_key?(:sys.get_state(hub).nodes, worker.node_id), "expiry must not be undone"
+    assert {:ok, %{inbox: %{pending_messages: 0}}} = Task.await(parked, 1000)
+    {:ok, %{nodes: nodes}} = Hub.snapshot(hub)
+    assert Enum.find(nodes, &(&1.node_id == worker.node_id)).online
   end
 
-  test "a failed expiry write releases the parked node as expired, announces it, and does not revive it" do
+  test "failed presence persistence cannot revoke a parked member" do
     dir = Path.join(System.tmp_dir!(), "agent_talk_p2_#{System.unique_integer([:positive])}")
     File.mkdir_p!(dir)
     file = Path.join(dir, "memberships.json")
@@ -542,7 +674,7 @@ defmodule AgentTalk.HubTest do
       start_supervised!(
         {Hub,
          name: nil,
-         ttl_ms: 1000,
+         presence_timeout_ms: 1000,
          max_inbox: 2,
          membership_file: file,
          pubsub: AgentTalk.P2PubSub,
@@ -556,25 +688,20 @@ defmodule AgentTalk.HubTest do
     await_waiter(hub, worker.node_id)
     {_from, timer, _args} = :sys.get_state(hub).waiters[worker.node_id]
 
-    # Subscribe after setup so only the expiry broadcast reaches this process.
+    # Subscribe after setup so only the presence update reaches this process.
     Phoenix.PubSub.subscribe(AgentTalk.P2PubSub, Hub.topic())
 
-    # The worker's lease lapses while parked, and the membership store can no
-    # longer be written: its path is now a directory, so every save fails.
+    # The presence timeout passes while the store is temporarily unwritable.
     Agent.update(clock, fn _ -> 1001 end)
     File.rm!(file)
     File.mkdir!(file)
 
     send(hub, {:timeout, timer, {:waiter_timeout, worker.node_id}})
 
-    # Even though the write failed, the expired caller is released as expired and
-    # not revived, and the expiry is announced so the dashboard does not go stale.
-    assert {:error, :expired, _} = Task.await(parked, 1000)
+    assert {:ok, %{inbox: %{pending_messages: 0}}} = Task.await(parked, 1000)
     assert_receive :hub_updated
     {:ok, %{nodes: nodes}} = Hub.snapshot(hub)
-
-    refute Enum.any?(nodes, &(&1.node_id == worker.node_id)),
-           "a failed write must not revive the lease"
+    assert Enum.find(nodes, &(&1.node_id == worker.node_id)).online
   end
 
   test "a long-poll wake does not revert a label changed during the wait", %{hub: hub, pm: pm} do
@@ -600,7 +727,7 @@ defmodule AgentTalk.HubTest do
     assert Enum.find(nodes, &(&1.node_id == worker.node_id)).name == "fresh"
   end
 
-  test "IDs are never reused after expiry or hub replacement within the server VM", %{
+  test "IDs are never reused after inactivity or hub replacement within the server VM", %{
     hub: hub,
     clock: clock,
     pm: pm
@@ -630,7 +757,7 @@ defmodule AgentTalk.HubTest do
     assert Enum.all?(results, &(&1.ring_id == pm.ring_id))
   end
 
-  test "presence sweeps publish expiry without a tool call", %{clock: clock} do
+  test "presence sweeps publish offline status without removing membership", %{clock: clock} do
     start_supervised!({Phoenix.PubSub, name: AgentTalk.HubTestPubSub})
     Phoenix.PubSub.subscribe(AgentTalk.HubTestPubSub, Hub.topic())
 
@@ -639,7 +766,7 @@ defmodule AgentTalk.HubTest do
         Supervisor.child_spec(
           {Hub,
            name: nil,
-           ttl_ms: 1000,
+           presence_timeout_ms: 1000,
            clock: fn -> Agent.get(clock, & &1) end,
            pubsub: AgentTalk.HubTestPubSub},
           id: :observed
@@ -651,7 +778,7 @@ defmodule AgentTalk.HubTest do
     Agent.update(clock, fn _ -> 1000 end)
     send(hub, :sweep)
     assert_receive :hub_updated
-    assert {:ok, %{nodes: []}} = Hub.snapshot(hub)
+    assert {:ok, %{nodes: [%{online: false}]}} = Hub.snapshot(hub)
   end
 
   describe "long-poll waits" do
@@ -675,7 +802,7 @@ defmodule AgentTalk.HubTest do
       hub =
         start_supervised!(
           Supervisor.child_spec(
-            {Hub, name: nil, ttl_ms: 100, clock: fn -> Agent.get(clock, & &1) end},
+            {Hub, name: nil, presence_timeout_ms: 100, clock: fn -> Agent.get(clock, & &1) end},
             id: :clamped
           )
         )
@@ -685,8 +812,7 @@ defmodule AgentTalk.HubTest do
       assert {:ok, %{inbox: %{pending_messages: 0}, waited_seconds: waited}} =
                Hub.list_nodes(auth(pm, %{wait_seconds: 10}), hub)
 
-      granted_half_the_lease = waited == 0.05
-      assert granted_half_the_lease, "the grant must be clamped to ttl/2, not the request"
+      assert waited == 0.05, "the grant must be clamped to half the presence interval"
       assert :sys.get_state(hub).waiters == %{}
     end
 
@@ -703,7 +829,7 @@ defmodule AgentTalk.HubTest do
       assert {:ok, %{waited_seconds: 0}} = Hub.list_nodes(auth(pm, %{wait_seconds: 0}), hub)
     end
 
-    test "a node expiring mid-park is told expired by the sweep", %{
+    test "an offline member remains parked until mail arrives", %{
       hub: hub,
       pm: pm,
       clock: clock
@@ -713,7 +839,9 @@ defmodule AgentTalk.HubTest do
       await_waiter(hub, worker.node_id)
       Agent.update(clock, fn _ -> 2000 end)
       send(hub, :sweep)
-      assert {:error, :expired, _} = Task.await(parked, 1000)
+      assert Map.has_key?(:sys.get_state(hub).nodes, worker.node_id)
+      send_message(hub, pm, %{to: [worker.node_id], message: "Still here"})
+      assert {:ok, %{inbox: %{pending_messages: 1}}} = Task.await(parked, 1000)
       assert :sys.get_state(hub).waiters == %{}
     end
 

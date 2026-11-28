@@ -1,13 +1,13 @@
 defmodule AgentTalk.Tools.ListNodes do
   @moduledoc """
-  List active members of your ring, optionally filtered by role. Also returns your
+  List registered members of your ring, including offline members, optionally filtered by role. Also returns your
   inbox's pending_messages and next_message_id without removing messages, even with
-  a role filter. Authenticates and renews only your lease. Host integrations can
+  a role filter. Authenticates and updates only your presence. Host integrations can
   poll this metadata and wake your session; the session receives and handles mail.
-  With wait_seconds, an empty-inbox reply is held until mail arrives, you expire,
+  With wait_seconds, an empty-inbox reply is held until mail arrives, you are evicted,
   or the server-capped wait elapses; replies to waited requests carry
   waited_seconds (the granted wait, 0 when the inbox already had mail).
-  Each listed node carries its role, name, project and purpose, so you can pick a
+  Each listed node carries online, last_seen, role, name, project and purpose, so you can pick a
   recipient by what it does. Optional project, name and purpose labels update only
   the authenticated caller's own entry.
   """

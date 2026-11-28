@@ -3,14 +3,13 @@ defmodule AgentTalk.PersistenceTest do
 
   alias AgentTalk.Hub
   @moduletag :tmp_dir
-  @missing "node is not registered or has expired; join again with role and ring_token"
 
   setup %{tmp_dir: dir} do
     clock = start_supervised!({Agent, fn -> %{mono: 0, wall: 1_800_000_000_000} end})
 
     opts = [
       name: nil,
-      ttl_ms: 1000,
+      presence_timeout_ms: 1000,
       membership_file: Path.join(dir, "private/memberships.json"),
       clock: fn -> Agent.get(clock, & &1.mono) end,
       wall_clock: fn -> Agent.get(clock, & &1.wall) end
@@ -63,7 +62,7 @@ defmodule AgentTalk.PersistenceTest do
     assert {:ok, %{messages: [%{message: "New task"}]}} = receive_messages(hub, worker)
   end
 
-  test "downtime counts toward expiry without losing the ring invitation or reusing IDs", %{
+  test "long downtime marks members offline without losing identities or invitations", %{
     hub: hub,
     clock: clock,
     opts: opts
@@ -73,20 +72,24 @@ defmodule AgentTalk.PersistenceTest do
     stop_supervised!(:persistent_hub)
     Agent.update(clock, &%{&1 | mono: -5000, wall: &1.wall + 1000})
     hub = start_hub(opts)
-    assert {:ok, %{nodes: []}} = Hub.snapshot(hub)
-    assert {:error, :expired, @missing} = Hub.list_nodes(auth(pm), hub)
-    worker = register(hub, %{role: "worker", ring_token: pm.ring_token})
+    assert {:ok, %{nodes: nodes}} = Hub.snapshot(hub)
+    assert length(nodes) == 2
+    assert Enum.all?(nodes, &(not &1.online))
+    assert {:ok, _} = Hub.list_nodes(auth(pm), hub)
+    worker = register(hub, Map.take(old_worker, [:role, :node_id, :token]))
     assert worker.ring_id == pm.ring_id
-    assert number(worker.node_id) > number(old_worker.node_id)
-    assert {:error, :expired, @missing} = Hub.list_nodes(auth(old_worker), hub)
+    assert worker.node_id == old_worker.node_id
+    same_token = worker.token == old_worker.token
+    assert same_token, "resuming must preserve the private token"
     stop_supervised!(:persistent_hub)
-    advance(clock, 1000)
+    advance(clock, 30 * 86_400_000)
     hub = start_hub(opts)
+    assert {:ok, _} = Hub.list_nodes(auth(old_worker), hub)
     next_pm = register(hub, %{role: "pm"})
     assert number(next_pm.ring_id) > number(worker.node_id)
   end
 
-  test "heartbeats persist lease activity and restart preserves the remaining lease", %{
+  test "heartbeats persist presence but crossing the timeout never deletes a member", %{
     hub: hub,
     clock: clock,
     opts: opts
@@ -100,7 +103,8 @@ defmodule AgentTalk.PersistenceTest do
     assert {:ok, %{nodes: [%{node_id: id}]}} = Hub.snapshot(hub)
     assert id == pm.node_id
     advance(clock, 1)
-    assert {:ok, %{nodes: []}} = Hub.snapshot(hub)
+    assert {:ok, %{nodes: [%{node_id: ^id, online: false}]}} = Hub.snapshot(hub)
+    assert {:ok, _} = Hub.list_nodes(auth(pm), hub)
   end
 
   test "corrupt or unsupported files fail startup instead of silently replacing identities", %{
@@ -188,21 +192,25 @@ defmodule AgentTalk.PersistenceTest do
       assert {:ok, %{messages: []}} = receive_messages(hub, worker)
     end
 
-    test "expired mail is not resurrected for a rejoined identity", %{
+    test "offline members recover queued mail with the same identity after restart", %{
       hub: hub,
       opts: opts,
       clock: clock
     } do
       pm = register(hub, %{role: "pm"})
       worker = register(hub, %{role: "worker", ring_token: pm.ring_token})
-      assert {:ok, _} = send_message(hub, pm, worker, "Doomed")
+      assert {:ok, _} = send_message(hub, pm, worker, "Kept")
       advance(clock, 1001)
 
       hub = restart(opts)
-      assert {:ok, %{nodes: []}} = Hub.snapshot(hub)
-      rejoined = register(hub, %{role: "worker", ring_token: pm.ring_token})
-      assert rejoined.node_id != worker.node_id
-      assert {:ok, %{messages: []}} = receive_messages(hub, rejoined)
+      assert {:ok, %{nodes: nodes}} = Hub.snapshot(hub)
+      assert length(nodes) == 2
+      assert Enum.all?(nodes, &(not &1.online))
+      returned = register(hub, Map.take(worker, [:role, :node_id, :token]))
+      assert returned.node_id == worker.node_id
+      same_token = returned.token == worker.token
+      assert same_token, "resuming must preserve the private token"
+      assert {:ok, %{messages: [%{message: "Kept"}]}} = receive_messages(hub, returned)
     end
 
     test "an evicted node stays gone after a restart and its queued mail is not restored", %{
@@ -218,7 +226,7 @@ defmodule AgentTalk.PersistenceTest do
       assert {:ok, %{evicted: true}} = Hub.evict(worker.node_id, hub)
       hub = restart(opts)
 
-      assert {:error, :expired, @missing} = Hub.list_nodes(auth(worker), hub)
+      assert {:error, :not_registered, _} = Hub.list_nodes(auth(worker), hub)
       {:ok, %{nodes: nodes}} = Hub.list_nodes(auth(pm), hub)
       refute Enum.any?(nodes, &(&1.node_id == worker.node_id))
 
@@ -322,10 +330,7 @@ defmodule AgentTalk.PersistenceTest do
                receive_messages(hub, pm)
     end
 
-    test "a failed pending query stops startup instead of faking empty inboxes", %{
-      hub: hub,
-      opts: opts
-    } do
+    test "a failed pending query stops startup instead of faking empty inboxes", %{opts: opts} do
       opts = Keyword.put(opts, :history_limit, 2)
       hub = restart(opts)
       pm = register(hub, %{role: "pm"})

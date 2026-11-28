@@ -106,7 +106,7 @@ test("tool authentication errors are classified without echoing response bodies"
 
 test("tool errors are classified by the server's machine-readable code, not its prose", async () => {
   for (const [code, expected] of [
-    ["expired", "expired"], ["invalid_token", "token"], ["invalid_labels", "tool"],
+    ["expired", "expired"], ["not_registered", "missing"], ["invalid_token", "token"], ["invalid_labels", "tool"],
   ]) {
     const fake = transport((body) => Response.json({ id: body.id, result: {
       isError: true,

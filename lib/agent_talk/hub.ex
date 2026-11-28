@@ -7,14 +7,14 @@ defmodule AgentTalk.Hub do
   # contract (sent to clients in structuredContent.error.code by
   # AgentTalk.tool_reply); the message is advisory prose, free to change.
   # Codes: :invalid_request, :invalid_labels, :invalid_ring_token,
-  # :invalid_token, :expired, :inbox_full, :storage.
+  # :invalid_token, :not_registered, :inbox_full, :storage.
   @labels_error "project, name and purpose must be nonempty labels of at most 128 characters without control characters"
 
   # Free-text display and discovery labels a caller sets on its own node, set at
   # register and updatable on list_nodes. purpose is the one line a searcher
   # reads to route by capability ("whoever does the deployments").
   @label_fields [:project, :name, :purpose]
-  @missing_node_error "node is not registered or has expired; join again with role and ring_token"
+  @missing_node_error "node is not registered or was revoked; ask the operator to restore membership"
   @invalid_token_error "invalid node token"
 
   # The inbox copy of a message. Recovery rebuilds exactly this shape from
@@ -53,14 +53,14 @@ defmodule AgentTalk.Hub do
     end
   end
 
-  # The hold a request may be granted, before the per-call ttl/2 term; shared so
+  # The hold a request may be granted, before the per-call presence/2 term; shared so
   # the client timeout and the server grant can never disagree on the cap.
   defp wait_cap_ms(seconds), do: min(seconds * 1000, @wait_cap_ms)
 
   def communicate(args, server \\ __MODULE__), do: GenServer.call(server, {:communicate, args})
   def snapshot(server \\ __MODULE__), do: GenServer.call(server, :snapshot)
 
-  # Operator-initiated removal of a node (force-expire). Called in-process from
+  # Operator-initiated revocation of a node. Called in-process from
   # the trusted local dashboard, not over MCP, so it takes no token.
   def evict(node_id, server \\ __MODULE__), do: GenServer.call(server, {:evict, node_id})
 
@@ -85,9 +85,9 @@ defmodule AgentTalk.Hub do
         membership_file: Keyword.get(opts, :membership_file),
         history_file: Keyword.get(opts, :history_file),
         pubsub: Keyword.get(opts, :pubsub),
-        ttl_ms:
-          Keyword.get_lazy(opts, :ttl_ms, fn ->
-            Application.fetch_env!(:agent_talk, :node_ttl_ms)
+        presence_ms:
+          Keyword.get_lazy(opts, :presence_timeout_ms, fn ->
+            Application.fetch_env!(:agent_talk, :presence_timeout_ms)
           end),
         history_limit:
           Keyword.get_lazy(opts, :history_limit, fn ->
@@ -103,9 +103,9 @@ defmodule AgentTalk.Hub do
 
     with {:ok, saved} <- MembershipStore.load(state.membership_file),
          {:ok, db} <- History.open(state.history_file) do
-      # Expired memberships are gone after restore/3, so pending rows for the
-      # surviving IDs are exactly the queued mail lost at shutdown. A failed
-      # query stops startup; it must not fake empty inboxes.
+      # Restore mail only for registered identities, including offline members.
+      # Explicitly evicted IDs stay gone. A failed query stops startup; it must
+      # not fake empty inboxes.
       result =
         with {:ok, messages} <- History.recent(db, state.history_limit),
              {:ok, counter} <- History.last_counter(db),
@@ -148,8 +148,7 @@ defmodule AgentTalk.Hub do
 
     state
     |> Map.merge(%{saved | nodes: nodes})
-    |> Map.merge(%{presence_dirty: false, presence_flushed_at: now})
-    |> expire_nodes(now)
+    |> Map.merge(%{presence_dirty: false, presence_flushed_at: now, swept_at: now})
   end
 
   defp inbox_message(event), do: Map.take(event, @message_fields)
@@ -179,7 +178,7 @@ defmodule AgentTalk.Hub do
   @impl true
   def handle_call(request, from, state) do
     now = state.clock.()
-    {reply, updated} = dispatch(request, expire_nodes(state, now), now)
+    {reply, updated} = dispatch(request, state, now)
 
     case persist(state, updated, now) do
       {:ok, persisted} ->
@@ -216,17 +215,12 @@ defmodule AgentTalk.Hub do
   @impl true
   def handle_info(:sweep, state) do
     now = state.clock.()
-    updated = expire_nodes(state, now)
     Process.send_after(self(), :sweep, sweep_interval(state))
+    {:ok, flushed} = flush_presence(state, now)
 
-    case persist(state, updated, now) do
-      {:ok, persisted} ->
-        notify_if_changed(state, persisted)
-        {:noreply, wake_ready_waiters(persisted)}
-
-      {:error, _} ->
-        {:noreply, state}
-    end
+    # Going offline is the one visible change no call makes, so announce it here.
+    if online_ids(state, state.swept_at) != online_ids(state, now), do: notify(state)
+    {:noreply, %{flushed | swept_at: now}}
   end
 
   # Cancelling a timer cannot unsend an already-queued timeout, so a timeout
@@ -235,30 +229,13 @@ defmodule AgentTalk.Hub do
   def handle_info({:timeout, timer, {:waiter_timeout, node_id}}, state) do
     case Map.get(state.waiters, node_id) do
       {_from, ^timer, _args} ->
-        # Expire first, as handle_call and :sweep do: a lease that lapsed while
-        # parked must not be revived by the timeout's renewing re-dispatch.
+        # A returning long poll updates presence, never allocates a new identity.
+        # A healthy caller's renewal is presence-only, so only a caller that went
+        # offline while parked is announced.
         now = state.clock.()
-        expired = expire_nodes(state, now)
-
-        # On a failed write keep the removal in memory and mark it dirty so the
-        # next presence flush retries the write, rather than committing it with
-        # no later change to trigger a retry.
-        flushed =
-          case persist(state, expired, now) do
-            {:ok, persisted} -> persisted
-            {:error, _} -> %{expired | presence_dirty: true}
-          end
-
-        # Announce the expiry whenever the in-memory removal took effect, whether
-        # or not the write succeeded: once memory drops the node a later disk-only
-        # retry finds nothing changed and would never announce it. Compare against
-        # the expired state, not the woken one, so a healthy caller's lease
-        # renewal does not broadcast a presence-only change.
-        notify_if_changed(state, flushed)
-
-        # Release the parked caller against the expired state: a node whose own
-        # lease lapsed gets :expired with no renewing re-dispatch.
-        {:noreply, wake_waiter(flushed, node_id)}
+        updated = wake_waiter(state, node_id)
+        if online_ids(state, now) != online_ids(updated, now), do: notify(updated)
+        {:noreply, updated}
 
       _ ->
         {:noreply, state}
@@ -280,8 +257,8 @@ defmodule AgentTalk.Hub do
 
   # Waking is re-dispatch, not a second reply path: the stored args minus the
   # wait run back through the normal list pipeline (a node gone since parking
-  # yields the usual expired error), and only waited_seconds — the original
-  # grant, recomputed — is layered on top. The re-dispatch renews the lease,
+  # yields the usual not_registered error), and only waited_seconds — the original
+  # grant, recomputed — is layered on top. The re-dispatch updates presence,
   # a presence-only change, so it is deferred to the regular presence flush.
   # Label fields are dropped: they were applied when the request first arrived,
   # so replaying them would revert a renewal that landed while the caller parked.
@@ -309,7 +286,7 @@ defmodule AgentTalk.Hub do
           end
         )
 
-        # Only a successful wake renewed the lease; a gone node returns an error
+        # Only a successful wake updated presence; a gone node returns an error
         # with unchanged state, so it must not trigger a spurious presence flush.
         case reply do
           {:ok, _} -> %{updated | presence_dirty: true}
@@ -331,10 +308,10 @@ defmodule AgentTalk.Hub do
     end)
   end
 
-  # Expiry is also enforced on every call; the timer only covers idle servers.
-  defp sweep_interval(state), do: state.ttl_ms |> div(20) |> min(60_000) |> max(1000)
+  # Presence is derived on every read; the sweep only flushes and announces it.
+  defp sweep_interval(state), do: state.presence_ms |> div(20) |> min(60_000) |> max(1000)
 
-  defp dispatch(:snapshot, state, _now) do
+  defp dispatch(:snapshot, state, now) do
     pending =
       Map.new(state.nodes, fn {id, node} ->
         {id, MapSet.new(:queue.to_list(node.inbox), & &1.id)}
@@ -352,7 +329,7 @@ defmodule AgentTalk.Hub do
       end)
 
     data = %{
-      nodes: public_nodes(state.nodes),
+      nodes: public_nodes(state.nodes, state, now),
       messages: messages,
       history_limit: state.history_limit,
       history_persistent: not is_nil(Map.get(state, :history_db))
@@ -361,8 +338,8 @@ defmodule AgentTalk.Hub do
     {{:ok, data}, state}
   end
 
-  # Drop a node exactly as a lease expiry would: its queued mail goes with it,
-  # and handle_call's persist + broadcast then apply. Idempotent — an unknown or
+  # Explicit revocation removes the node and its queued mail; handle_call's
+  # persist + broadcast then apply. Idempotent — an unknown or
   # already-gone id reports evicted: false and changes nothing.
   defp dispatch({:evict, node_id}, state, _now) do
     {existing, nodes} = Map.pop(state.nodes, node_id)
@@ -370,15 +347,14 @@ defmodule AgentTalk.Hub do
   end
 
   # Fan one operator message out to every current member of a ring, built and
-  # delivered through emit_event/5 from a synthetic operator sender (no ring
+  # delivered through emit_event/6 from a synthetic operator sender (no ring
   # project, so project is nil). handle_call's persist + archive + broadcast +
   # wake-waiters wrapper then applies, exactly as for a send.
   defp dispatch({:broadcast, ring_id, message}, state, _now) do
     recipients = state |> ring_nodes(ring_id) |> Map.keys() |> Enum.sort()
 
     with :ok <- validate_message(message),
-         :ok <- validate_recipients(recipients),
-         :ok <- check_capacity(recipients, state) do
+         :ok <- validate_recipients(recipients) do
       sender = %{
         id: @operator_id,
         role: @operator_role,
@@ -387,7 +363,7 @@ defmodule AgentTalk.Hub do
         ring_id: ring_id
       }
 
-      emit_event(state, sender, recipients, message, nil)
+      emit_event(state, sender, recipients, message, nil, true)
     else
       {:error, _, _} = error -> {error, state}
     end
@@ -446,7 +422,7 @@ defmodule AgentTalk.Hub do
 
               nodes =
                 ring_nodes(updated, caller.ring_id)
-                |> public_nodes()
+                |> public_nodes(updated, now)
                 |> Enum.filter(&(role == nil or &1.role == role))
 
               next_message_id =
@@ -488,15 +464,15 @@ defmodule AgentTalk.Hub do
 
   # Only waited requests gain waited_seconds; plain replies stay byte-identical
   # to a server without this feature. The clamp is the single authority on the
-  # grant: under common 30s proxy timeouts and at most half the lease, so a
-  # parked healthy node never expires mid-wait.
+  # grant: under common 30s proxy timeouts and half the presence interval, so
+  # repeated long polls keep presence current.
   defp effective_wait(args, state) do
     case Map.get(args, :wait_seconds) do
       nil ->
         {:ok, nil}
 
       seconds when is_integer(seconds) and seconds >= 0 ->
-        {:ok, min(wait_cap_ms(seconds), div(state.ttl_ms, 2))}
+        {:ok, min(wait_cap_ms(seconds), div(state.presence_ms, 2))}
 
       _ ->
         {:error, :invalid_request, "wait_seconds must be a non-negative integer"}
@@ -504,15 +480,12 @@ defmodule AgentTalk.Hub do
   end
 
   defp renew_node(args, state, now) do
-    case state.nodes[args.node_id] do
-      nil ->
-        {{:error, :expired, @missing_node_error}, state}
+    case authenticate(args, state, now) do
+      {:error, _, _} = error ->
+        {error, state}
 
-      node ->
+      {:ok, node, updated} ->
         cond do
-          args.token != node.token ->
-            {{:error, :invalid_token, @invalid_token_error}, state}
-
           args.role != node.role ->
             {{:error, :invalid_request, "renewal cannot change role"}, state}
 
@@ -521,13 +494,13 @@ defmodule AgentTalk.Hub do
             {{:error, :invalid_ring_token, "ring_token does not match this node's ring"}, state}
 
           true ->
-            node =
-              node
-              |> Map.merge(Map.take(args, @label_fields))
-              |> Map.merge(%{seen_at: now, last_seen: timestamp(state)})
+            updated =
+              update_in(
+                updated.nodes[node.node_id],
+                &Map.merge(&1, Map.take(args, @label_fields))
+              )
 
-            updated = put_in(state.nodes[node.node_id], node)
-            {{:ok, registration(node, updated)}, updated}
+            {{:ok, registration(updated.nodes[node.node_id], updated, now)}, updated}
         end
     end
   end
@@ -568,15 +541,16 @@ defmodule AgentTalk.Hub do
     }
 
     updated = put_in(state.nodes[node.node_id], node)
-    {{:ok, registration(node, updated)}, updated}
+    {{:ok, registration(node, updated, now)}, updated}
   end
 
-  defp registration(node, state) do
+  defp registration(node, state, now) do
     data =
-      Map.merge(public_node(node), %{
+      Map.merge(public_node(node, state, now), %{
         token: node.token,
         ring_token: state.rings[node.ring_id],
-        expires_in_seconds: state.ttl_ms / 1000,
+        expires_in_seconds: nil,
+        presence_timeout_seconds: state.presence_ms / 1000,
         instructions: """
         Save this complete response privately before another call; never publish either token.
         Renew with role, node_id and token. Use list_nodes with node_id and token to discover
@@ -584,9 +558,12 @@ defmodule AgentTalk.Hub do
         or to_role, or receive your inbox when notified or between tasks. An optional host
         integration can check list_nodes.inbox and wake your session without draining mail.
         Without an integration, the operator resumes idle agents. Do not use LLM turns for
-        empty polling or start other agents. After expiry, join again with
-        role and ring_token, save the new identity, and reconcile work with the project record.
-        Ring tokens invite members; only your private node token authenticates your calls.
+        empty polling or start other agents. Membership does not expire from inactivity:
+        return with the same saved credentials even after going offline. Presence becomes
+        offline after the advertised timeout, but identity and queued mail remain.
+        If membership is missing or revoked, stop and ask the operator; do not create a ring
+        or silently replace your identity. Ring tokens invite members; only your private
+        node token authenticates your calls.
         """
       })
 
@@ -605,7 +582,7 @@ defmodule AgentTalk.Hub do
   defp authenticate(args, state, now) do
     case state.nodes[Map.get(args, :node_id)] do
       nil ->
-        {:error, :expired, @missing_node_error}
+        {:error, :not_registered, @missing_node_error}
 
       node ->
         if Map.get(args, :token) == node.token do
@@ -655,8 +632,7 @@ defmodule AgentTalk.Hub do
   defp communicate(%{action: "send"} = args, state, node) do
     with :ok <- validate_message(Map.get(args, :message)),
          :ok <- validate_reply_to(Map.get(args, :reply_to)),
-         {:ok, recipients} <- recipients(args, ring_nodes(state, node.ring_id), node.node_id),
-         :ok <- check_capacity(recipients, state) do
+         {:ok, recipients} <- recipients(args, ring_nodes(state, node.ring_id), node.node_id) do
       sender = %{
         id: node.node_id,
         role: node.role,
@@ -665,7 +641,14 @@ defmodule AgentTalk.Hub do
         ring_id: node.ring_id
       }
 
-      emit_event(state, sender, recipients, args.message, Map.get(args, :reply_to))
+      emit_event(
+        state,
+        sender,
+        recipients,
+        args.message,
+        Map.get(args, :reply_to),
+        Map.get(args, :to_role) != nil
+      )
     else
       {:error, _, _} = error -> {error, state}
     end
@@ -673,8 +656,8 @@ defmodule AgentTalk.Hub do
 
   # Read-only delivery visibility for the sender: its own recent sends still in
   # the history window, each with who has received it and who is still pending.
-  # Derives entirely from state.messages; mutates nothing (the lease was already
-  # renewed by authenticate/3).
+  # Derives entirely from state.messages; mutates nothing (presence was already
+  # updated by authenticate/3).
   defp communicate(%{action: "status"} = args, state, node) do
     if content_fields?(args) do
       {{:error, :invalid_request, "status takes no to, to_role, message or reply_to fields"},
@@ -712,7 +695,7 @@ defmodule AgentTalk.Hub do
           do: {:ok, ids},
           else:
             {:error, :invalid_request,
-             "unknown or expired recipients: #{Enum.join(missing, ", ")}"}
+             "unknown or revoked recipients: #{Enum.join(missing, ", ")}"}
 
       to == nil and valid_id?(role) ->
         ids =
@@ -731,14 +714,6 @@ defmodule AgentTalk.Hub do
     end
   end
 
-  defp check_capacity(recipients, state) do
-    if Enum.any?(recipients, &(:queue.len(state.nodes[&1].inbox) >= state.max_inbox)) do
-      {:error, :inbox_full, "a recipient inbox is full; no messages were delivered"}
-    else
-      :ok
-    end
-  end
-
   defp validate_recipients([]),
     do: {:error, :invalid_request, "no agents are registered in this ring"}
 
@@ -748,7 +723,26 @@ defmodule AgentTalk.Hub do
   # operator broadcast each build a `sender` descriptor and call this, so the
   # event schema (see @message_fields) stays defined in exactly one place and
   # both paths archive, deliver and render identically.
-  defp emit_event(state, sender, recipients, message, reply_to) do
+  defp emit_event(state, sender, recipients, message, reply_to, best_effort?) do
+    {full, available} =
+      Enum.split_with(recipients, &(:queue.len(state.nodes[&1].inbox) >= state.max_inbox))
+
+    if full != [] and (not best_effort? or available == []) do
+      blockers = Enum.map_join(full, ", ", &"#{node_name(state.nodes[&1])} (#{&1})")
+
+      {{:error, :inbox_full, "recipient inboxes full: #{blockers}; no messages were delivered"},
+       state}
+    else
+      skipped =
+        Enum.map(full, fn id ->
+          %{node_id: id, name: node_name(state.nodes[id]), reason: "inbox_full"}
+        end)
+
+      enqueue_event(state, sender, available, message, reply_to, skipped)
+    end
+  end
+
+  defp enqueue_event(state, sender, recipients, message, reply_to, skipped) do
     {id, state} = allocate_id("message", state)
 
     event = %{
@@ -769,7 +763,7 @@ defmodule AgentTalk.Hub do
     nodes = deliver(state.nodes, recipients, inbox_message(event))
     history = Enum.take([event | state.messages], state.history_limit)
 
-    {{:ok, %{message_id: event.id, delivered_to: recipients}},
+    {{:ok, %{message_id: event.id, delivered_to: recipients, skipped: skipped}},
      %{state | nodes: nodes, messages: history}}
   end
 
@@ -829,7 +823,8 @@ defmodule AgentTalk.Hub do
 
   # Writing the membership file on every heartbeat would fsync once per
   # authenticated call, so presence-only changes (last_seen bumps) are flushed
-  # at most once per ttl/20; a restart loses at most that much lease activity.
+  # at most once per presence interval/20. A restart can slightly underreport
+  # recent presence but cannot remove an identity.
   defp persist(previous, updated, now) do
     cond do
       previous.rings != updated.rings or previous.next_id != updated.next_id ->
@@ -847,7 +842,7 @@ defmodule AgentTalk.Hub do
   end
 
   defp flush_presence(%{presence_dirty: true} = state, now) do
-    if now - state.presence_flushed_at >= div(state.ttl_ms, 20) do
+    if now - state.presence_flushed_at >= div(state.presence_ms, 20) do
       case save_now(state, now) do
         {:ok, flushed} ->
           {:ok, flushed}
@@ -888,23 +883,29 @@ defmodule AgentTalk.Hub do
   defp ring_nodes(state, ring_id),
     do: Map.filter(state.nodes, fn {_id, node} -> node.ring_id == ring_id end)
 
-  defp public_nodes(nodes) do
-    nodes |> Map.values() |> Enum.sort_by(& &1.node_id) |> Enum.map(&public_node/1)
+  defp public_nodes(nodes, state, now) do
+    nodes
+    |> Map.values()
+    |> Enum.sort_by(& &1.node_id)
+    |> Enum.map(&public_node(&1, state, now))
   end
 
-  defp expire_nodes(state, now) do
-    nodes = Map.reject(state.nodes, fn {_id, node} -> now - node.seen_at >= state.ttl_ms end)
-    %{state | nodes: nodes}
-  end
+  # Derived, never stored: presence changes with time alone, so a stored flag
+  # would go stale between calls and make an unpersisted flip look like a change.
+  defp online?(node, state, now), do: now - node.seen_at < state.presence_ms
+
+  defp online_ids(state, now),
+    do: for({id, node} <- state.nodes, online?(node, state, now), do: id)
 
   defp notify_if_changed(previous, updated) do
-    if updated.pubsub &&
-         (previous.nodes != updated.nodes or previous.messages != updated.messages) do
-      Phoenix.PubSub.broadcast(updated.pubsub, topic(), :hub_updated)
-    end
+    if previous.nodes != updated.nodes or previous.messages != updated.messages,
+      do: notify(updated)
   end
 
-  defp public_node(node) do
+  defp notify(%{pubsub: nil}), do: :ok
+  defp notify(state), do: Phoenix.PubSub.broadcast(state.pubsub, topic(), :hub_updated)
+
+  defp public_node(node, state, now) do
     %{
       node_id: node.node_id,
       role: node.role,
@@ -913,6 +914,7 @@ defmodule AgentTalk.Hub do
       project: Map.get(node, :project),
       purpose: Map.get(node, :purpose),
       last_seen: node.last_seen,
+      online: online?(node, state, now),
       pending_messages: :queue.len(node.inbox)
     }
   end

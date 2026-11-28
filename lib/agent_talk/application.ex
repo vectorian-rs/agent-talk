@@ -6,14 +6,14 @@ defmodule AgentTalk.Application do
 
   @impl true
   def start(_type, _args) do
-    ttl_ms = Application.fetch_env!(:agent_talk, :node_ttl_ms)
+    presence_ms = Application.fetch_env!(:agent_talk, :presence_timeout_ms)
     history_limit = Application.fetch_env!(:agent_talk, :message_history_limit)
 
     children =
       [
         {Phoenix.PubSub, name: AgentTalk.PubSub},
         {AgentTalk.Hub,
-         ttl_ms: ttl_ms,
+         presence_timeout_ms: presence_ms,
          history_limit: history_limit,
          pubsub: AgentTalk.PubSub,
          membership_file: Application.fetch_env!(:agent_talk, :membership_file),
@@ -27,7 +27,7 @@ defmodule AgentTalk.Application do
     Logger.info(
       "AgentTalk v#{Application.spec(:agent_talk, :vsn)} config: " <>
         "#{Application.fetch_env!(:agent_talk, :config_file)}; " <>
-        "registration lease: #{div(ttl_ms, 1000)} seconds; message history: #{history_limit}; " <>
+        "presence timeout: #{div(presence_ms, 1000)} seconds; message history: #{history_limit}; " <>
         "memberships: #{Application.fetch_env!(:agent_talk, :membership_file) || "memory only"}; " <>
         "conversation archive: #{Application.fetch_env!(:agent_talk, :history_file) || "disabled"}"
     )

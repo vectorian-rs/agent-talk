@@ -329,7 +329,26 @@ test("cancellation pauses automatic turns while metadata checks continue; resume
   f.watcher.stop();
 });
 
-test("a short saved lease adjusts the heartbeat interval", async () => {
+test("durable membership uses its presence timeout to pace heartbeats", async () => {
+  const f = fixture();
+  f.state.member.expires_in_seconds = null;
+  f.state.member.presence_timeout_seconds = 1;
+  await f.watcher.start();
+  assert.ok(f.timers.at(-1).delay < 500);
+  f.watcher.stop();
+});
+
+test("missing or revoked membership requires an operator, not an automatic rejoin turn", async () => {
+  const f = fixture();
+  f.state.error = new ClientError("missing", "Membership missing or revoked");
+  await f.watcher.start();
+  await f.watcher.check();
+  assert.equal(f.events.length, 0);
+  assert.equal(f.statuses.at(-1).state, "registration");
+  f.watcher.stop();
+});
+
+test("a legacy short saved lease still adjusts the heartbeat interval", async () => {
   const f = fixture();
   f.state.member.expires_in_seconds = 1;
   await f.watcher.start();

@@ -63,7 +63,9 @@ defmodule AgentTalk.Web.OperatorLive do
     # selection changed since (e.g. that ring vanished and the view fell back to
     # another), refuse rather than deliver to a ring the operator never confirmed.
     # On success the hub's pubsub refresh re-renders every view and we clear the
-    # box; a capacity or storage error is surfaced and the draft is kept.
+    # box and report skipped members; if nobody receives it, keep the draft.
+    socket = clear_flash(socket)
+
     cond do
       socket.assigns.ring == nil ->
         {:noreply, socket}
@@ -73,9 +75,30 @@ defmodule AgentTalk.Web.OperatorLive do
          put_flash(socket, :error, "The selected ring changed before sending; nothing was sent.")}
 
       true ->
+        socket = assign(socket, :compose, message)
+
         case Hub.broadcast(socket.assigns.ring, message) do
-          {:ok, _} -> {:noreply, assign(socket, :compose, "")}
-          {:error, _code, msg} -> {:noreply, put_flash(socket, :error, msg)}
+          {:ok, %{delivered_to: delivered, skipped: skipped}} ->
+            socket = assign(socket, :compose, "")
+
+            socket =
+              if skipped == [] do
+                socket
+              else
+                names = Enum.map_join(skipped, ", ", &"#{&1.name} (#{&1.node_id})")
+
+                put_flash(
+                  socket,
+                  :info,
+                  "Delivered to #{length(delivered)} members. Skipped full inboxes: #{names}. " <>
+                    "Skipped members will not receive this message. Retry only those members, not the whole ring."
+                )
+              end
+
+            {:noreply, socket}
+
+          {:error, _code, msg} ->
+            {:noreply, put_flash(socket, :error, msg)}
         end
     end
   end
@@ -242,6 +265,17 @@ defmodule AgentTalk.Web.OperatorLive do
         {Phoenix.Flash.get(@flash, :error)}
       </p>
 
+      <p
+        :if={Phoenix.Flash.get(@flash, :info)}
+        id="operator-notice"
+        class="operator-error"
+        role="alert"
+        phx-click="clear_error"
+        title="Dismiss"
+      >
+        {Phoenix.Flash.get(@flash, :info)}
+      </p>
+
       <main id="main" class="wrap operator-main">
         <section class="console-heading" aria-labelledby="console-title">
           <div>
@@ -250,7 +284,7 @@ defmodule AgentTalk.Web.OperatorLive do
             <p class="console-intro">Message routing, inbox status, and agent presence.</p>
           </div>
           <dl class="console-stats">
-            <div><dt>Active registrations</dt><dd id="agent-count">{length(@nodes)}</dd></div>
+            <div><dt>Registered members</dt><dd id="agent-count">{length(@nodes)}</dd></div>
             <div><dt>Messages retained</dt><dd><span id="message-count">{length(@messages)}</span><span class="stat-limit"> / {@snapshot.history_limit}</span></dd></div>
           </dl>
         </section>
@@ -303,7 +337,7 @@ defmodule AgentTalk.Web.OperatorLive do
             </div>
             <div :if={@nodes == []} id="empty-agents" class="empty-agents">
               <span class="empty-node" aria-hidden="true">+</span>
-              <p>No active registrations.</p>
+              <p>No registered members.</p>
               <p class="muted">Agents are listed after registration.</p>
             </div>
             <ul :if={@nodes != []} id="agent-list" class="agent-list">
@@ -320,22 +354,22 @@ defmodule AgentTalk.Web.OperatorLive do
                     Last activity <time datetime={node.last_seen} title={node.last_seen}>{clock(node.last_seen)} UTC</time>
                   </p>
                 </div>
-                <span class="agent-online" aria-label="Registration active"></span>
+                <span class={["agent-presence", node.online && "agent-online"]} aria-label={if node.online, do: "Online", else: "Offline"} title={if node.online, do: "Online: recent authenticated activity", else: "Offline: membership and queued mail retained"}></span>
                 <button
                   type="button"
                   class="agent-evict"
                   phx-click="evict"
                   phx-value-node_id={node.node_id}
-                  data-confirm={"Evict #{node.name}? This expires its registration and discards #{node.pending_messages} queued message(s). An active agent can rejoin automatically."}
-                  title="Force-expire this node"
+                  data-confirm={"Evict #{node.name}? This revokes its membership and discards #{node.pending_messages} queued message(s). Its saved credentials will no longer work."}
+                  title="Revoke this membership"
                 >
                   Evict
                 </button>
               </li>
             </ul>
             <div class="presence-note">
-              <span class="small-label">Registration lease</span>
-              <p>Discovery, messaging, and registration renew the caller's lease.</p>
+              <span class="small-label">Membership and presence</span>
+              <p>Inactive members go offline, not away. Discovery, messaging, and registration update the caller's presence. Online does not mean the model is working.</p>
             </div>
           </aside>
 

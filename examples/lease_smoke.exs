@@ -1,5 +1,5 @@
 # mix run --no-start examples/lease_smoke.exs
-# Own hub, short lease and ephemeral port; never connects to the trial server.
+# Legacy filename; verifies durable membership and expiring presence in isolation.
 alias Anubis.Client
 verify = fn condition, message -> if !condition, do: raise(message) end
 
@@ -8,8 +8,8 @@ verify.(
   "Run with mix run --no-start"
 )
 
-ttl_ms = 2000
-Application.put_env(:agent_talk, :node_ttl_ms, ttl_ms)
+presence_ms = 1000
+Application.put_env(:agent_talk, :presence_timeout_ms, presence_ms)
 Application.put_env(:agent_talk, :http_enabled, false)
 Application.put_env(:agent_talk, :membership_file, nil)
 Application.put_env(:agent_talk, :history_file, nil)
@@ -30,17 +30,12 @@ call = fn client, tool, args ->
   end
 end
 
-expect_error = fn client, tool, args, code, expected ->
+expect_error = fn client, tool, args, code ->
   case Client.call_tool(client, tool, args) do
     {:ok, %{is_error: true, result: result}} ->
       verify.(
         result["structuredContent"]["error"]["code"] == code,
         "Unexpected #{tool} error code"
-      )
-
-      verify.(
-        Enum.any?(result["content"], &String.starts_with?(&1["text"], expected)),
-        "Unexpected #{tool} error"
       )
 
     _ ->
@@ -49,31 +44,6 @@ expect_error = fn client, tool, args, code, expected ->
 end
 
 auth = fn node, fields -> Map.merge(%{node_id: node["node_id"], token: node["token"]}, fields) end
-
-renew = fn client, node ->
-  fresh = call.(client, "register_node", Map.take(node, ["node_id", "role", "token"]))
-
-  verify.(
-    fresh["node_id"] == node["node_id"] and fresh["token"] == node["token"] and
-      fresh["ring_token"] == node["ring_token"],
-    "Renewal changed identity or credentials"
-  )
-
-  verify.(fresh["expires_in_seconds"] == ttl_ms / 1000, "TTL mismatch")
-  fresh
-end
-
-rejoin = fn client, old ->
-  fresh = call.(client, "register_node", Map.take(old, ["role", "ring_token"]))
-
-  verify.(
-    fresh["node_id"] != old["node_id"] and fresh["ring_id"] == old["ring_id"],
-    "Rejoin reused an ID or changed rings"
-  )
-
-  verify.(fresh["expires_in_seconds"] == ttl_ms / 1000, "Rejoin TTL mismatch")
-  fresh
-end
 
 for name <- [AgentTalk.SmokePM, AgentTalk.SmokeW1, AgentTalk.SmokeW2] do
   {:ok, _} =
@@ -91,8 +61,8 @@ pm_client = AgentTalk.SmokePM
 pm = call.(pm_client, "register_node", %{role: "pm"})
 
 verify.(
-  pm["expires_in_seconds"] == 2 and is_binary(pm["onboarding_prompt_template"]),
-  "PM onboarding mismatch"
+  is_nil(pm["expires_in_seconds"]) and pm["presence_timeout_seconds"] == 1,
+  "Membership/presence contract mismatch"
 )
 
 workers =
@@ -100,108 +70,47 @@ workers =
     {client, call.(client, "register_node", %{role: "worker", ring_token: pm["ring_token"]})}
   end
 
-exchange = fn pm, workers ->
-  ids = Enum.map(workers, fn {_client, worker} -> worker["node_id"] end) |> Enum.sort()
-  found = call.(pm_client, "list_nodes", auth.(pm, %{role: "worker"}))
-  verify.(Enum.map(found["nodes"], & &1["node_id"]) == ids, "Ring discovery mismatch")
+ids = workers |> Enum.map(fn {_, worker} -> worker["node_id"] end) |> Enum.sort()
 
-  sent =
-    call.(
-      pm_client,
-      "communicate",
-      auth.(pm, %{action: "send", to_role: "worker", message: "Task"})
-    )
+sent =
+  call.(
+    pm_client,
+    "communicate",
+    auth.(pm, %{action: "send", to_role: "worker", message: "Queued before offline"})
+  )
 
-  verify.(sent["delivered_to"] == ids, "Ring broadcast mismatch")
-
-  for {client, worker} <- workers do
-    inbox = call.(client, "communicate", auth.(worker, %{action: "receive"}))
-
-    verify.(
-      Enum.map(inbox["messages"], & &1["id"]) == [sent["message_id"]],
-      "Worker delivery mismatch"
-    )
-
-    call.(
-      client,
-      "communicate",
-      auth.(worker, %{action: "send", to: [pm["node_id"]], message: "Ready"})
-    )
-  end
-
-  inbox = call.(pm_client, "communicate", auth.(pm, %{action: "receive"}))
-  verify.(Enum.sort(Enum.map(inbox["messages"], & &1["from"])) == ids, "PM reply mismatch")
-end
-
-exchange.(pm, workers)
-pm = renew.(pm_client, pm)
-
-IO.puts(
-  "PASS: PM created a ring; two independent clients joined, discovered and exchanged messages"
-)
-
-Process.sleep(ttl_ms + 200)
-missing = "node is not registered or has expired; join again with role and ring_token"
-expect_error.(pm_client, "list_nodes", auth.(pm, %{}), "expired", missing)
-
-expect_error.(
-  pm_client,
-  "register_node",
-  Map.take(pm, ["role", "node_id", "token"]),
-  "expired",
-  missing
-)
-
-old_pm = pm
-pm = rejoin.(pm_client, pm)
-expect_error.(pm_client, "communicate", auth.(old_pm, %{action: "receive"}), "expired", missing)
-
-expect_error.(
-  pm_client,
-  "communicate",
-  auth.(%{pm | "token" => old_pm["token"]}, %{action: "receive"}),
-  "invalid_token",
-  "invalid node token"
-)
-
-workers = Enum.map(workers, fn {client, old} -> {client, rejoin.(client, old)} end)
-
-IO.puts(
-  "PASS: idle expiry required fresh IDs; the invitation retained ring membership; stale credentials failed"
-)
-
-call.(
-  pm_client,
-  "communicate",
-  auth.(pm, %{action: "send", to_role: "worker", message: "Uncollected"})
-)
-
-Process.sleep(div(ttl_ms, 2))
-pm = renew.(pm_client, pm)
-Process.sleep(div(ttl_ms, 2) + 200)
-found = call.(pm_client, "list_nodes", auth.(pm, %{}))
-verify.(Enum.map(found["nodes"], & &1["node_id"]) == [pm["node_id"]], "Worker expiry mismatch")
-expired_worker = workers |> hd() |> elem(1)
-
-expect_error.(
-  pm_client,
-  "communicate",
-  auth.(pm, %{action: "send", to: [expired_worker["node_id"]], message: "Not delivered"}),
-  "invalid_request",
-  "unknown or expired recipients"
-)
-
-workers = Enum.map(workers, fn {client, old} -> {client, rejoin.(client, old)} end)
+verify.(sent["delivered_to"] == ids, "Broadcast mismatch")
+Process.sleep(presence_ms + 200)
+found = call.(pm_client, "list_nodes", auth.(pm, %{role: "worker"}))
+verify.(Enum.map(found["nodes"], & &1["node_id"]) == ids, "Offline membership disappeared")
+verify.(Enum.all?(found["nodes"], &(not &1["online"])), "Presence did not go offline")
+IO.puts("PASS: idle agents went offline without losing membership or queued mail")
 
 for {client, worker} <- workers do
+  returned = call.(client, "register_node", Map.take(worker, ["role", "node_id", "token"]))
+
   verify.(
-    call.(client, "communicate", auth.(worker, %{action: "receive"}))["messages"] == [],
-    "Expired inbox survived"
+    returned["node_id"] == worker["node_id"] and returned["token"] == worker["token"],
+    "Returning changed identity or credentials"
+  )
+
+  inbox = call.(client, "communicate", auth.(worker, %{action: "receive"}))
+
+  verify.(
+    Enum.map(inbox["messages"], & &1["id"]) == [sent["message_id"]],
+    "Offline queued mail was lost"
+  )
+
+  call.(
+    client,
+    "communicate",
+    auth.(worker, %{action: "send", to: [pm["node_id"]], message: "Returned"})
   )
 end
 
-exchange.(pm, workers)
-IO.puts("PASS: expiry discarded queued messages; rejoining restored PM-to-workers delivery")
+replies = call.(pm_client, "communicate", auth.(pm, %{action: "receive"}))
+verify.(Enum.sort(Enum.map(replies["messages"], & &1["from"])) == ids, "Return exchange mismatch")
+IO.puts("PASS: original identities returned, collected mail and replied to the PM")
 
 other_pm = call.(pm_client, "register_node", %{role: "pm"})
 
@@ -212,22 +121,21 @@ expect_error.(
   pm_client,
   "communicate",
   auth.(pm, %{action: "send", to: [outsider["node_id"]], message: "Cross-ring"}),
-  "invalid_request",
-  "unknown or expired recipients"
+  "invalid_request"
 )
 
-sent =
-  call.(
-    pm_client,
-    "communicate",
-    auth.(pm, %{action: "send", to_role: "all", message: "Ring only"})
-  )
+expect_error.(pm_client, "list_nodes", %{node_id: pm["node_id"], token: "wrong"}, "invalid_token")
+IO.puts("PASS: ring isolation and private-node authentication remain enforced")
 
-verify.(length(sent["delivered_to"]) == 2, "Broadcast crossed ring boundary")
+{client, worker} = hd(workers)
+{:ok, %{evicted: true}} = AgentTalk.Hub.evict(worker["node_id"])
+expect_error.(client, "list_nodes", auth.(worker, %{}), "not_registered")
 
-verify.(
-  call.(AgentTalk.SmokeW2, "communicate", auth.(outsider, %{action: "receive"}))["messages"] == [],
-  "Other ring received a broadcast"
+expect_error.(
+  client,
+  "register_node",
+  Map.take(worker, ["role", "node_id", "token"]),
+  "not_registered"
 )
 
-IO.puts("PASS: direct messages and broadcasts cannot cross ring boundaries; no tokens printed")
+IO.puts("PASS: explicit eviction invalidated the old identity; no tokens printed")

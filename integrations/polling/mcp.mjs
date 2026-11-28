@@ -89,6 +89,9 @@ export class McpClient {
           const code = result.structuredContent?.error?.code;
           const text = (result.content ?? []).filter((item) => item.type === "text")
             .map((item) => item.text).join("\n");
+          if (code === "not_registered") {
+            throw new ClientError("missing", "AgentTalk membership is missing or revoked; ask the operator to restore it.");
+          }
           if (code === "expired" || (!code && text.includes("node is not registered or has expired"))) {
             throw new ClientError("expired", "AgentTalk membership expired or the server restarted.");
           }

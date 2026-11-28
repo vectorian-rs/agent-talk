@@ -5,11 +5,11 @@ defmodule AgentTalk.ConfigTest do
 
   @moduletag :tmp_dir
 
-  test "dev and prod use a 24-hour lease and retain 50 messages" do
+  test "dev and prod use 60-second presence and retain 50 messages" do
     for file <- ["config/dev.toml", "config/prod.toml"] do
       settings = Config.load!(file)
       assert settings[:port] == 4000
-      assert settings[:node_ttl_ms] == 86_400_000
+      assert settings[:presence_timeout_ms] == 60_000
       assert settings[:message_history_limit] == 50
       assert settings[:membership_file] == Path.expand("data/memberships.json")
       assert settings[:history_file] == Path.expand("data/history.sqlite3")
@@ -19,21 +19,39 @@ defmodule AgentTalk.ConfigTest do
   test "hub defaults use the loaded application settings" do
     hub = start_supervised!({Hub, name: nil})
     {:ok, node} = Hub.register(%{role: "pm"}, hub)
-    assert node.expires_in_seconds == 86_400
+    assert node.expires_in_seconds == nil
+    assert node.presence_timeout_seconds == 60
     assert {:ok, %{history_limit: 50}} = Hub.snapshot(hub)
   end
 
   test "custom settings convert seconds and derive browser origins from the port", %{tmp_dir: dir} do
     settings =
       dir
-      |> write_config(%{"port" => 4100, "node_ttl_seconds" => 3600, "message_history_limit" => 2})
+      |> write_config(%{
+        "port" => 4100,
+        "presence_timeout_seconds" => 3600,
+        "message_history_limit" => 2
+      })
       |> Config.load!()
 
     assert settings[:port] == 4100
-    assert settings[:node_ttl_ms] == 3_600_000
+    assert settings[:presence_timeout_ms] == 3_600_000
     assert settings[:message_history_limit] == 2
     assert settings[:allowed_origins] == ["http://localhost:4100", "http://127.0.0.1:4100"]
     assert settings[:membership_file] == Path.expand("../data/memberships.json", dir)
+  end
+
+  test "new presence setting is explicit and cannot be mixed with the legacy key", %{tmp_dir: dir} do
+    file = write_config(dir, %{"presence_timeout_seconds" => 15})
+    assert Config.load!(file)[:presence_timeout_ms] == 15_000
+    file = write_config(dir, %{"presence_timeout_seconds" => 15, "node_ttl_seconds" => 86_400})
+    assert_raise ArgumentError, ~r/not both/, fn -> Config.load!(file) end
+  end
+
+  test "the legacy node_ttl_seconds key alone still sets the presence timeout", %{tmp_dir: dir} do
+    file = Path.join(dir, "legacy.toml")
+    File.write!(file, "port = 4000\nnode_ttl_seconds = 86400\nmessage_history_limit = 50\n")
+    assert Config.load!(file)[:presence_timeout_ms] == 86_400_000
   end
 
   test "storage paths resolve relative to the TOML file", %{tmp_dir: dir} do
@@ -60,9 +78,9 @@ defmodule AgentTalk.ConfigTest do
     for overrides <- [
           %{"port" => 0},
           %{"port" => 65_536},
-          %{"node_ttl_seconds" => 0},
-          %{"node_ttl_seconds" => -1},
-          %{"node_ttl_seconds" => "86400"},
+          %{"presence_timeout_seconds" => 0},
+          %{"presence_timeout_seconds" => -1},
+          %{"presence_timeout_seconds" => "86400"},
           %{"message_history_limit" => 0},
           %{"message_history_limit" => 1.5},
           %{"membership_file" => ""},
@@ -73,7 +91,7 @@ defmodule AgentTalk.ConfigTest do
           %{"history_file" => false},
           %{"allowed_origins" => "http://localhost:4000"},
           %{"allowed_origins" => [""]},
-          %{"node_ttl_second" => 3600}
+          %{"presence_timeout_second" => 3600}
         ] do
       file = write_config(dir, overrides)
       assert_raise ArgumentError, fn -> Config.load!(file) end
@@ -83,7 +101,7 @@ defmodule AgentTalk.ConfigTest do
   test "missing required values and malformed or missing files fail startup", %{tmp_dir: dir} do
     file = Path.join(dir, "invalid.toml")
     File.write!(file, "port = 4000\n")
-    assert_raise ArgumentError, ~r/node_ttl_seconds/, fn -> Config.load!(file) end
+    assert_raise ArgumentError, ~r/presence_timeout_seconds/, fn -> Config.load!(file) end
     File.write!(file, "port = [\n")
     assert_raise TomlElixir.Parser.Error, fn -> Config.load!(file) end
     assert_raise File.Error, fn -> Config.load!(Path.join(dir, "missing.toml")) end
@@ -98,7 +116,7 @@ defmodule AgentTalk.ConfigTest do
   defp write_config(dir, overrides) do
     values =
       Map.merge(
-        %{"port" => 4000, "node_ttl_seconds" => 86_400, "message_history_limit" => 50},
+        %{"port" => 4000, "presence_timeout_seconds" => 60, "message_history_limit" => 50},
         overrides
       )
 

@@ -116,8 +116,9 @@ export class InboxWatcher {
         this.report("waiting", "AgentTalk waiting for this session's saved registration.");
         return;
       }
-      this.pollIntervalMs = Number.isFinite(member.expires_in_seconds) && member.expires_in_seconds > 0 ?
-        Math.min(this.intervalMs, Math.max(100, member.expires_in_seconds * 1000 / 3)) : this.intervalMs;
+      const presenceSeconds = member.presence_timeout_seconds ?? member.expires_in_seconds;
+      this.pollIntervalMs = Number.isFinite(presenceSeconds) && presenceSeconds > 0 ?
+        Math.min(this.intervalMs, Math.max(100, presenceSeconds * 1000 / 3)) : this.intervalMs;
       // Never expose this key, the registration, or raw server errors to callbacks.
       const identity = JSON.stringify([member.node_id, member.token, member.ring_id]);
       if (identity !== this.identity) {
@@ -179,9 +180,10 @@ export class InboxWatcher {
     } catch (error) {
       if (this.stale(runId)) return;
       this.failures++;
-      if (["expired", "token"].includes(error.code)) {
+      if (["missing", "expired", "token"].includes(error.code)) {
         this.report("registration", error.message);
-        if (!this.paused && !this.authNotified) {
+        // Revocation is not permission to rejoin as a replacement identity.
+        if (error.code !== "missing" && !this.paused && !this.authNotified) {
           this.authNotified = true;
           const woke = await this.requestWake({ kind: "recovery" }, runId);
           if (this.stale(runId)) return;

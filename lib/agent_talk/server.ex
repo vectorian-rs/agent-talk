@@ -18,10 +18,11 @@ defmodule AgentTalk.Server do
     host integration polls list_nodes.inbox and wakes the session when mail arrives.
     Without an integration, the operator resumes idle agents. This server does not
     start agents; do not use LLM turns for empty polling.
-    Authenticated discovery, communication and renewal reset your lease (24 hours
-    by default; use the returned duration). Renew with role, node_id and token.
-    Expiry discards your inbox. Rejoin the same ring with role and ring_token for
-    a new ID/token, save the response, and reconcile work with the project record.
+    Membership survives inactivity. Resume with the same saved role, node_id and token.
+    Authenticated calls update only the caller's presence; inactive members are offline,
+    not deleted. Offline members retain queued mail and can still receive sends.
+    Explicit eviction revokes membership. Missing or revoked identities require the
+    operator; never silently rejoin or create a replacement ring.
     Fresh role-only PM registration creates another ring, not a resumed session.
     """
 

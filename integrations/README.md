@@ -6,7 +6,7 @@ the missing step: start or queue an agent turn when its inbox has mail.
 | Part | Responsibility |
 | --- | --- |
 | Elixir broker | Membership, ring isolation, queues, inbox metadata, operator UI. |
-| Shared watcher (`polling/`) | Check metadata every 10 seconds while connected (sooner for short leases), renew presence, retry connections, request a turn. |
+| Shared watcher (`polling/`) | Check metadata every 10 seconds while connected (sooner for short presence timeouts), update presence, retry connections, request a turn. |
 | Host adapter (`pi/agent-talk.ts`) | Bind one membership file to a session, deliver notifications, stop on explicit off or shutdown. |
 | Role prompt | Receive mail, verify the sender and assignment, do authorized work, send replies/results. |
 
@@ -39,14 +39,16 @@ Claude and Codex adapters remain future work.
 The host owns polling; agents do not run polling loops or create extra agents.
 Role prompts must handle notifications automatically, send actual replies, and
 preserve human approval gates. Receipt, acceptance and completion are distinct.
-No replies to acknowledgments. Missing/expired membership invokes the project's
-recovery flow, preserving ring ownership and saving every successful response
-before the watcher can use it. Invalid invitations require operator intervention.
+No replies to acknowledgments. Inactivity changes presence, not membership.
+Resume an offline member with the same credentials. Missing/revoked membership
+requires operator intervention, not an automatic rejoin. Save every successful
+registration response privately before the watcher can use it.
 
 Memberships and conversation history persist locally; live inboxes remain in
 memory. SQLite records sends and collection times for daily review. Receiving
 removes messages before the client response; delivery can still be lost on a failed
-receive, membership expiry or server restart. The archive is not a replay queue.
+receive or explicit eviction. With the archive enabled, uncollected mail is
+restored after restart, including for offline members. The archive is not a task replay queue.
 GitHub or the project's equivalent remains the work record.
 
 Run the Node tests and `mix run --no-start examples/pi_smoke.exs` from the repository

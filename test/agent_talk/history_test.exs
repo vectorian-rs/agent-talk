@@ -13,7 +13,7 @@ defmodule AgentTalk.HistoryTest do
 
     opts = [
       name: nil,
-      ttl_ms: 86_400_000,
+      presence_timeout_ms: 86_400_000,
       history_limit: 2,
       membership_file: Path.join(dir, "memberships.json"),
       history_file: Path.join(dir, "history.sqlite3"),
@@ -88,6 +88,73 @@ defmodule AgentTalk.HistoryTest do
 
     assert {:ok, [%{id: ^id, message: "Uncollected", received_by: [^worker_id]}]} =
              History.daily(c.history_file, ~D[2026-11-10])
+  end
+
+  for kind <- [:role, :operator] do
+    test "partial #{kind} delivery archives and restores only actual recipients", c do
+      :sys.replace_state(c.hub, &%{&1 | max_inbox: 1})
+      available = register(c.hub, %{role: "worker", ring_token: c.pm.ring_token})
+      assert {:ok, %{message_id: original}} = send_message(c, [c.worker.node_id], "Already full")
+
+      emit = fn ->
+        case unquote(kind) do
+          :role ->
+            Hub.communicate(
+              auth(c.pm, %{action: "send", to_role: "worker", message: "Task"}),
+              c.hub
+            )
+
+          :operator ->
+            Hub.broadcast(c.pm.ring_id, "Task", c.hub)
+        end
+      end
+
+      # An archive failure must not leak a partial delivery or success response.
+      db = :sys.get_state(c.hub).history_db
+
+      :ok =
+        SQLite.execute(
+          db,
+          "CREATE TRIGGER fail_send BEFORE INSERT ON messages BEGIN SELECT RAISE(ABORT, 'test failure'); END;"
+        )
+
+      assert {:error, :storage, _} = emit.()
+      assert {:ok, %{inbox: %{pending_messages: 0}}} = Hub.list_nodes(auth(available), c.hub)
+      :ok = SQLite.execute(db, "DROP TRIGGER fail_send")
+
+      assert {:ok, %{message_id: id, delivered_to: delivered, skipped: [skipped]}} = emit.()
+
+      expected =
+        if unquote(kind) == :role,
+          do: [available.node_id],
+          else: [c.pm.node_id, available.node_id]
+
+      assert Enum.sort(delivered) == Enum.sort(expected)
+      assert skipped == %{node_id: c.worker.node_id, name: c.worker.name, reason: "inbox_full"}
+
+      # Every target is now full: do not archive another event or acknowledge a send.
+      assert {:error, :inbox_full, _} = emit.()
+      assert {:ok, [_, event]} = History.daily(c.history_file, ~D[2026-11-10])
+      assert event.id == id
+      assert event.to == delivered
+      assert Enum.sort(Map.keys(event.to_names)) == Enum.sort(delivered)
+      assert event.received_by == []
+
+      stop_supervised!(Hub)
+      # Restart with more capacity: skipped mail must still never appear later.
+      hub = start_supervised!({Hub, c.opts})
+
+      for recipient <- if(unquote(kind) == :role, do: [available], else: [c.pm, available]) do
+        assert {:ok, %{messages: [%{id: ^id}]}} = receive_messages(hub, recipient)
+        assert {:ok, %{messages: []}} = receive_messages(hub, recipient)
+      end
+
+      assert {:ok, %{messages: [%{id: ^original}]}} = receive_messages(hub, c.worker)
+      assert {:ok, %{messages: []}} = receive_messages(hub, c.worker)
+      assert {:ok, [_, collected]} = History.daily(c.history_file, ~D[2026-11-10])
+      assert Enum.sort(collected.received_by) == Enum.sort(delivered)
+      assert Enum.sort(Map.keys(collected.collected_at)) == Enum.sort(delivered)
+    end
   end
 
   test "reply references round-trip through the archive; rows written before them decode as nil",

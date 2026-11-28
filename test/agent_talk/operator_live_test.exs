@@ -176,6 +176,23 @@ defmodule AgentTalk.OperatorLiveTest do
     refute has_element?(view, "#agent-#{pm.node_id} .agent-purpose")
   end
 
+  test "an offline member remains visible and returns online with the same identity" do
+    pm = register(%{role: "pm", project: "hiko", name: "hiko / pm"})
+    {:ok, view, _} = live(build_conn(), "/")
+    assert has_element?(view, "#agent-#{pm.node_id} [aria-label='Online']")
+
+    :sys.replace_state(Hub, fn state ->
+      put_in(state.nodes[pm.node_id].seen_at, state.clock.() - state.presence_ms)
+    end)
+
+    send(Hub, :sweep)
+    :sys.get_state(Hub)
+    assert has_element?(view, "#agent-#{pm.node_id} [aria-label='Offline']")
+    assert has_element?(view, "#agent-count", "1")
+    assert {:ok, _} = Hub.list_nodes(auth(pm, %{}))
+    assert has_element?(view, "#agent-#{pm.node_id} [aria-label='Online']")
+  end
+
   test "the operator evicts an agent, removing it from the live view" do
     pm = register(%{role: "pm", project: "hiko", name: "hiko / pm"})
     worker = join(pm, "hiko / w-1")
@@ -204,6 +221,54 @@ defmodule AgentTalk.OperatorLiveTest do
 
     assert {:ok, %{messages: [%{message: "Standup in five"}]}} =
              Hub.communicate(auth(worker, %{action: "receive"}))
+  end
+
+  test "a partial broadcast names skipped members, clears the draft and warns against ring retries" do
+    :sys.replace_state(Hub, &%{&1 | max_inbox: 1})
+    pm = register(%{role: "pm", project: "hiko", name: "hiko / pm"})
+    full = join(pm, "w-3")
+    available = join(pm, "w-4")
+    assert {:ok, _} = send_message(pm, full.node_id, "Already full")
+    {:ok, view, _} = live(build_conn(), "/")
+
+    view |> form("#operator-broadcast", %{message: "New task"}) |> render_submit()
+
+    assert has_element?(view, "#operator-notice", "Delivered to 2 members")
+    assert has_element?(view, "#operator-notice", "w-3 (#{full.node_id})")
+    assert has_element?(view, "#operator-notice", "Skipped members will not receive this message")
+    assert has_element?(view, "#operator-notice", "Retry only those members, not the whole ring")
+    refute has_element?(view, "#operator-broadcast textarea", "New task")
+    refute has_element?(view, "#operator-error")
+
+    assert {:ok, %{messages: [%{message: "New task"}]}} =
+             Hub.communicate(auth(available, %{action: "receive"}))
+
+    assert {:ok, %{messages: [%{message: "New task"}]}} =
+             Hub.communicate(auth(pm, %{action: "receive"}))
+
+    assert {:ok, %{messages: [%{message: "Already full"}]}} =
+             Hub.communicate(auth(full, %{action: "receive"}))
+
+    view |> form("#operator-broadcast", %{message: "Next announcement"}) |> render_submit()
+    refute has_element?(view, "#operator-notice"), "old skip warnings must not survive a new send"
+    refute has_element?(view, "#operator-error")
+  end
+
+  test "an all-full broadcast keeps the draft and reports every blocking member" do
+    :sys.replace_state(Hub, &%{&1 | max_inbox: 1})
+    pm = register(%{role: "pm", name: "team pm"})
+    worker = join(pm, "w-3")
+    for node <- [pm, worker], do: send_message(pm, node.node_id, "Full")
+    {:ok, view, _} = live(build_conn(), "/")
+
+    view |> form("#operator-broadcast", %{message: "Blocked draft"}) |> render_submit()
+
+    assert has_element?(view, "#operator-error", "team pm (#{pm.node_id})")
+    assert has_element?(view, "#operator-error", "w-3 (#{worker.node_id})")
+    assert has_element?(view, "#operator-error", "no messages were delivered")
+    assert has_element?(view, "#operator-broadcast textarea", "Blocked draft")
+    refute has_element?(view, "#operator-notice")
+    refute has_element?(view, "#message-stream", "Blocked draft")
   end
 
   test "a broadcast draft is dropped when its ring disappears, not retargeted to another ring" do
