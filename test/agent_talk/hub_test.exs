@@ -288,18 +288,91 @@ defmodule AgentTalk.HubTest do
     assert from == pm.node_id
   end
 
-  test "unknown recipients and inbox capacity reject the whole broadcast", %{hub: hub, pm: pm} do
-    worker = join(hub, pm)
-    other = join(hub, pm)
+  test "explicit recipients remain atomic and full-inbox errors name every blocker", %{
+    hub: hub,
+    pm: pm
+  } do
+    full =
+      for name <- ["w-3", "w-4"],
+          do: register(hub, %{role: "worker", ring_token: pm.ring_token, name: name})
 
-    assert {:error, _, _} =
-             send_message(hub, pm, %{to: [worker.node_id, "missing"], message: "Task"})
+    available = join(hub, pm)
+
+    assert {:error, :invalid_request, _} =
+             send_message(hub, pm, %{to: [available.node_id, "missing"], message: "Unknown"})
+
+    for worker <- full, text <- ["One", "Two"] do
+      assert {:ok, _} = send_message(hub, pm, %{to: [worker.node_id], message: text})
+    end
+
+    assert {:error, :inbox_full, error} =
+             send_message(hub, pm, %{
+               to: [available.node_id | Enum.map(full, & &1.node_id)],
+               message: "Atomic"
+             })
+
+    for worker <- full, do: assert(error =~ "#{worker.name} (#{worker.node_id})")
+    assert error =~ "no messages were delivered"
+    assert {:ok, %{messages: []}} = receive_messages(hub, available)
+
+    for worker <- full do
+      assert {:ok, %{messages: [%{message: "One"}, %{message: "Two"}]}} =
+               receive_messages(hub, worker)
+    end
+  end
+
+  for target <- ["worker", "all"] do
+    test "role #{target} skips full offline inboxes without blocking other recipients", %{
+      hub: hub,
+      clock: clock,
+      pm: pm
+    } do
+      full = register(hub, %{role: "worker", ring_token: pm.ring_token, name: "w-3"})
+      available = join(hub, pm)
+      for text <- ["One", "Two"], do: send_message(hub, pm, %{to: [full.node_id], message: text})
+      Agent.update(clock, fn _ -> 30 * 86_400_000 end)
+      full_id = full.node_id
+      available_id = available.node_id
+
+      assert {:ok,
+              %{
+                message_id: id,
+                delivered_to: [^available_id],
+                skipped: [%{node_id: ^full_id, name: "w-3", reason: "inbox_full"}]
+              }} = send_message(hub, pm, %{to_role: unquote(target), message: "New task"})
+
+      assert {:ok, %{messages: [%{id: ^id, to: [^available_id], to_names: names} | _]}} =
+               Hub.snapshot(hub)
+
+      assert Map.keys(names) == [available_id]
+      assert {:ok, %{sent: [latest | _]}} = Hub.communicate(auth(pm, %{action: "status"}), hub)
+      assert latest.to == [available_id]
+      assert latest.pending == [available_id]
+      assert {:ok, %{messages: [%{id: ^id}]}} = receive_messages(hub, available)
+
+      assert {:ok, %{messages: [%{message: "One"}, %{message: "Two"}]}} =
+               receive_messages(hub, full)
+
+      assert {:ok, %{messages: []}} = receive_messages(hub, full)
+    end
+  end
+
+  test "a role send with every inbox full fails without creating a message", %{hub: hub, pm: pm} do
+    worker = register(hub, %{role: "worker", ring_token: pm.ring_token, name: "w-3"})
+    for text <- ["One", "Two"], do: send_message(hub, pm, %{to: [worker.node_id], message: text})
+    assert {:ok, %{messages: before}} = Hub.snapshot(hub)
+
+    assert {:error, :inbox_full, error} =
+             send_message(hub, pm, %{to_role: "worker", message: "Nobody gets this"})
+
+    assert error =~ "w-3 (#{worker.node_id})"
+    assert error =~ "no messages were delivered"
+    assert {:ok, %{messages: ^before}} = Hub.snapshot(hub)
+
+    assert {:ok, %{messages: [%{message: "One"}, %{message: "Two"}]}} =
+             receive_messages(hub, worker)
 
     assert {:ok, %{messages: []}} = receive_messages(hub, worker)
-    for text <- ["One", "Two"], do: send_message(hub, pm, %{to: [worker.node_id], message: text})
-    assert {:error, _, _} = send_message(hub, pm, %{to_role: "worker", message: "Three"})
-    assert {:ok, %{messages: []}} = receive_messages(hub, other)
-    assert {:ok, %{messages: [_, _]}} = receive_messages(hub, worker)
   end
 
   test "offline inbox capacity still rejects new mail without deleting accepted mail", %{
@@ -517,6 +590,39 @@ defmodule AgentTalk.HubTest do
     end
 
     assert {:ok, %{messages: []}} = receive_messages(hub, outsider), "scoped to the one ring"
+  end
+
+  test "an operator broadcast skips full members but still wakes available watchers", %{
+    hub: hub,
+    pm: pm
+  } do
+    worker = register(hub, %{role: "worker", ring_token: pm.ring_token, name: "w-3"})
+    other_pm = register(hub, %{role: "pm"})
+    for text <- ["One", "Two"], do: send_message(hub, pm, %{to: [worker.node_id], message: text})
+    task = Task.async(fn -> Hub.list_nodes(auth(pm, %{wait_seconds: 10}), hub) end)
+    await_waiter(hub, pm.node_id)
+    pm_id = pm.node_id
+    worker_id = worker.node_id
+
+    assert {:ok, %{message_id: id, delivered_to: [^pm_id], skipped: [skipped]}} =
+             Hub.broadcast(pm.ring_id, "Partial announcement", hub)
+
+    assert skipped == %{node_id: worker_id, name: "w-3", reason: "inbox_full"}
+    assert {:ok, %{inbox: %{pending_messages: 1}}} = Task.await(task)
+    assert {:ok, %{messages: [%{id: ^id}]}} = receive_messages(hub, pm)
+    assert {:ok, %{messages: []}} = receive_messages(hub, other_pm)
+
+    assert {:ok, %{messages: [%{message: "One"}, %{message: "Two"}]}} =
+             receive_messages(hub, worker)
+  end
+
+  test "an operator broadcast fails when every member is full", %{hub: hub, pm: pm} do
+    for text <- ["One", "Two"], do: send_message(hub, pm, %{to: [pm.node_id], message: text})
+    assert {:ok, %{messages: before}} = Hub.snapshot(hub)
+    assert {:error, :inbox_full, error} = Hub.broadcast(pm.ring_id, "Not delivered", hub)
+    assert error =~ pm.node_id
+    assert error =~ "no messages were delivered"
+    assert {:ok, %{messages: ^before}} = Hub.snapshot(hub)
   end
 
   test "an operator broadcast wakes a parked long-poll watcher immediately", %{hub: hub, pm: pm} do

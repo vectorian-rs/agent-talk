@@ -399,8 +399,12 @@ selecting currently reachable agents, not membership existence alone.
 | `communicate` | Own `node_id`/`token` and `action`. Send: `message` and either `to: ["<ID>", ...]` or `to_role`. Receive: no send fields; drains the FIFO inbox. |
 
 Clients wrap these arguments in `tools/call`. Broadcasts exclude the sender;
-`to_role: "all"` reaches every other ring member. Discovery and delivery stay
-inside the ring. Invalid recipients or full inboxes reject the entire fan-out.
+`to_role: "all"` targets every other ring member. Discovery and delivery stay
+inside the ring. Explicit `to` sends are all-or-nothing: invalid recipients or
+full inboxes reject the entire send, with full members named by ID and display
+name. Role sends and operator broadcasts skip full inboxes and deliver to the
+remaining members. If every inbox is full, the operation fails with `inbox_full`;
+no message ID or archive entry is created.
 
 Save every complete registration via a same-directory temporary file, mode `0600`,
 then rename over the previous file. Roles use 1..64 letters, digits, underscores,
@@ -422,8 +426,13 @@ A fresh role-only PM call creates another ring.
 with a role filter. Received messages contain `id`, `from`, `from_name`,
 `from_role`, `ring_id`, `message` and `sent_at`, so a recipient reads who sent a
 message without a separate `list_nodes` call. Send returns
-`message_id`/`delivered_to`; delivery means queued, so require an application reply
-before acceptance. Tool errors use `isError: true`.
+`message_id`, `delivered_to` and `skipped`. Each skipped entry contains `node_id`,
+`name` and `reason: "inbox_full"`; an unskipped send returns `skipped: []`.
+Skipped members never receive that message, even after they free capacity or the
+broker restarts. Retry only skipped recipients, not the whole group. History,
+collection counts and restart recovery include only actual recipients.
+Delivery means queued, so require an application reply before acceptance.
+Tool errors use `isError: true`.
 
 ## Development and examples
 

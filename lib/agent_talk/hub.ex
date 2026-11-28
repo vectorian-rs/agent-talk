@@ -347,15 +347,14 @@ defmodule AgentTalk.Hub do
   end
 
   # Fan one operator message out to every current member of a ring, built and
-  # delivered through emit_event/5 from a synthetic operator sender (no ring
+  # delivered through emit_event/6 from a synthetic operator sender (no ring
   # project, so project is nil). handle_call's persist + archive + broadcast +
   # wake-waiters wrapper then applies, exactly as for a send.
   defp dispatch({:broadcast, ring_id, message}, state, _now) do
     recipients = state |> ring_nodes(ring_id) |> Map.keys() |> Enum.sort()
 
     with :ok <- validate_message(message),
-         :ok <- validate_recipients(recipients),
-         :ok <- check_capacity(recipients, state) do
+         :ok <- validate_recipients(recipients) do
       sender = %{
         id: @operator_id,
         role: @operator_role,
@@ -364,7 +363,7 @@ defmodule AgentTalk.Hub do
         ring_id: ring_id
       }
 
-      emit_event(state, sender, recipients, message, nil)
+      emit_event(state, sender, recipients, message, nil, true)
     else
       {:error, _, _} = error -> {error, state}
     end
@@ -633,8 +632,7 @@ defmodule AgentTalk.Hub do
   defp communicate(%{action: "send"} = args, state, node) do
     with :ok <- validate_message(Map.get(args, :message)),
          :ok <- validate_reply_to(Map.get(args, :reply_to)),
-         {:ok, recipients} <- recipients(args, ring_nodes(state, node.ring_id), node.node_id),
-         :ok <- check_capacity(recipients, state) do
+         {:ok, recipients} <- recipients(args, ring_nodes(state, node.ring_id), node.node_id) do
       sender = %{
         id: node.node_id,
         role: node.role,
@@ -643,7 +641,14 @@ defmodule AgentTalk.Hub do
         ring_id: node.ring_id
       }
 
-      emit_event(state, sender, recipients, args.message, Map.get(args, :reply_to))
+      emit_event(
+        state,
+        sender,
+        recipients,
+        args.message,
+        Map.get(args, :reply_to),
+        Map.get(args, :to_role) != nil
+      )
     else
       {:error, _, _} = error -> {error, state}
     end
@@ -709,14 +714,6 @@ defmodule AgentTalk.Hub do
     end
   end
 
-  defp check_capacity(recipients, state) do
-    if Enum.any?(recipients, &(:queue.len(state.nodes[&1].inbox) >= state.max_inbox)) do
-      {:error, :inbox_full, "a recipient inbox is full; no messages were delivered"}
-    else
-      :ok
-    end
-  end
-
   defp validate_recipients([]),
     do: {:error, :invalid_request, "no agents are registered in this ring"}
 
@@ -726,7 +723,26 @@ defmodule AgentTalk.Hub do
   # operator broadcast each build a `sender` descriptor and call this, so the
   # event schema (see @message_fields) stays defined in exactly one place and
   # both paths archive, deliver and render identically.
-  defp emit_event(state, sender, recipients, message, reply_to) do
+  defp emit_event(state, sender, recipients, message, reply_to, best_effort?) do
+    {full, available} =
+      Enum.split_with(recipients, &(:queue.len(state.nodes[&1].inbox) >= state.max_inbox))
+
+    if full != [] and (not best_effort? or available == []) do
+      blockers = Enum.map_join(full, ", ", &"#{node_name(state.nodes[&1])} (#{&1})")
+
+      {{:error, :inbox_full, "recipient inboxes full: #{blockers}; no messages were delivered"},
+       state}
+    else
+      skipped =
+        Enum.map(full, fn id ->
+          %{node_id: id, name: node_name(state.nodes[id]), reason: "inbox_full"}
+        end)
+
+      enqueue_event(state, sender, available, message, reply_to, skipped)
+    end
+  end
+
+  defp enqueue_event(state, sender, recipients, message, reply_to, skipped) do
     {id, state} = allocate_id("message", state)
 
     event = %{
@@ -747,7 +763,7 @@ defmodule AgentTalk.Hub do
     nodes = deliver(state.nodes, recipients, inbox_message(event))
     history = Enum.take([event | state.messages], state.history_limit)
 
-    {{:ok, %{message_id: event.id, delivered_to: recipients}},
+    {{:ok, %{message_id: event.id, delivered_to: recipients, skipped: skipped}},
      %{state | nodes: nodes, messages: history}}
   end
 

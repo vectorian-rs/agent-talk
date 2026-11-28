@@ -3,7 +3,12 @@ defmodule AgentTalk.Tools.Communicate do
   Send to one or many agents, or receive and remove all messages in your inbox.
   For send, supply message and either to (node IDs) or to_role (a role or all).
   Discovery, direct messages and broadcasts stay within your ring. Broadcasts exclude
-  the sender. Receive takes only action, node_id and your private node token.
+  the sender. Role sends skip full inboxes and return delivered_to plus skipped
+  entries (node_id, name, reason=inbox_full). Skipped members never get that
+  message; retry only skipped IDs, not the whole group. Explicit to sends are
+  all-or-nothing; full-inbox errors name the blockers. If all targets are full,
+  the send fails and creates no message.
+  Receive takes only action, node_id and your private node token.
   Authenticated calls update only the caller's presence; incoming mail does not
   make an offline recipient online. Queued mail survives inactivity; explicit
   eviction discards that member's inbox.

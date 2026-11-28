@@ -239,6 +239,75 @@ defmodule AgentTalk.MCPTest do
     end
   end
 
+  test "MCP exposes partial role delivery and names atomic and all-full blockers", %{url: url} do
+    previous_limit = :sys.get_state(AgentTalk.Hub).max_inbox
+    :sys.replace_state(AgentTalk.Hub, &%{&1 | max_inbox: 1})
+    on_exit(fn -> :sys.replace_state(AgentTalk.Hub, &%{&1 | max_inbox: previous_limit}) end)
+    name = AgentTalk.TestPartialSend
+    client(name, url)
+    pm = call(name, "register_node", %{role: "pm"})
+
+    full =
+      call(name, "register_node", %{role: "worker", ring_token: pm["ring_token"], name: "w-3"})
+
+    available =
+      call(name, "register_node", %{role: "worker", ring_token: pm["ring_token"], name: "w-4"})
+
+    call(name, "communicate", auth(pm, %{action: "send", to: [full["node_id"]], message: "Full"}))
+
+    blocked =
+      tool_error(
+        name,
+        "communicate",
+        auth(pm, %{
+          action: "send",
+          to: [available["node_id"], full["node_id"]],
+          message: "Atomic"
+        })
+      )
+
+    assert blocked =~ "w-3 (#{full["node_id"]})"
+    assert blocked =~ "no messages were delivered"
+    assert call(name, "communicate", auth(available, %{action: "receive"}))["messages"] == []
+
+    result =
+      call(
+        name,
+        "communicate",
+        auth(pm, %{action: "send", to_role: "worker", message: "New task"})
+      )
+
+    assert result["delivered_to"] == [available["node_id"]]
+
+    assert result["skipped"] == [
+             %{"node_id" => full["node_id"], "name" => "w-3", "reason" => "inbox_full"}
+           ]
+
+    assert {:ok, response} =
+             Anubis.Client.call_tool(
+               name,
+               "communicate",
+               auth(pm, %{action: "send", to_role: "worker", message: "Nobody gets this"})
+             )
+
+    assert response.is_error,
+           "expected all-full tool error (response omitted to protect credentials)"
+
+    error = response.result["structuredContent"]["error"]
+    assert error["code"] == "inbox_full"
+    assert error["message"] =~ "w-3 (#{full["node_id"]})"
+    assert error["message"] =~ "w-4 (#{available["node_id"]})"
+    refute Map.has_key?(response.result["structuredContent"], "message_id")
+
+    assert [%{"id" => id, "message" => "New task"}] =
+             call(name, "communicate", auth(available, %{action: "receive"}))["messages"]
+
+    assert id == result["message_id"]
+
+    assert [%{"message" => "Full"}] =
+             call(name, "communicate", auth(full, %{action: "receive"}))["messages"]
+  end
+
   test "raw MCP initialization provides ring onboarding and exactly three tools", %{url: url} do
     response =
       post(url, %{

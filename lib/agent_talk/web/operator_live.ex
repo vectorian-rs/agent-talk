@@ -63,7 +63,9 @@ defmodule AgentTalk.Web.OperatorLive do
     # selection changed since (e.g. that ring vanished and the view fell back to
     # another), refuse rather than deliver to a ring the operator never confirmed.
     # On success the hub's pubsub refresh re-renders every view and we clear the
-    # box; a capacity or storage error is surfaced and the draft is kept.
+    # box and report skipped members; if nobody receives it, keep the draft.
+    socket = clear_flash(socket)
+
     cond do
       socket.assigns.ring == nil ->
         {:noreply, socket}
@@ -73,9 +75,30 @@ defmodule AgentTalk.Web.OperatorLive do
          put_flash(socket, :error, "The selected ring changed before sending; nothing was sent.")}
 
       true ->
+        socket = assign(socket, :compose, message)
+
         case Hub.broadcast(socket.assigns.ring, message) do
-          {:ok, _} -> {:noreply, assign(socket, :compose, "")}
-          {:error, _code, msg} -> {:noreply, put_flash(socket, :error, msg)}
+          {:ok, %{delivered_to: delivered, skipped: skipped}} ->
+            socket = assign(socket, :compose, "")
+
+            socket =
+              if skipped == [] do
+                socket
+              else
+                names = Enum.map_join(skipped, ", ", &"#{&1.name} (#{&1.node_id})")
+
+                put_flash(
+                  socket,
+                  :info,
+                  "Delivered to #{length(delivered)} members. Skipped full inboxes: #{names}. " <>
+                    "Skipped members will not receive this message. Retry only those members, not the whole ring."
+                )
+              end
+
+            {:noreply, socket}
+
+          {:error, _code, msg} ->
+            {:noreply, put_flash(socket, :error, msg)}
         end
     end
   end
@@ -240,6 +263,17 @@ defmodule AgentTalk.Web.OperatorLive do
         title="Dismiss"
       >
         {Phoenix.Flash.get(@flash, :error)}
+      </p>
+
+      <p
+        :if={Phoenix.Flash.get(@flash, :info)}
+        id="operator-notice"
+        class="operator-error"
+        role="alert"
+        phx-click="clear_error"
+        title="Dismiss"
+      >
+        {Phoenix.Flash.get(@flash, :info)}
       </p>
 
       <main id="main" class="wrap operator-main">

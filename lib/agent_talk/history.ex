@@ -119,7 +119,7 @@ defmodule AgentTalk.History do
 
   # Any successful emit returns the new message_id, so key archival on that reply
   # shape rather than the request verb: an agent send and an operator broadcast
-  # both mint their id at the single Hub.emit_event/5 site and archive here with
+  # both mint their id at the single Hub.enqueue_event/6 site and archive here with
   # no per-producer clause. Without the row a recipient's later receive finds no
   # archived message, fails its collected_json lookup, and rolls the receive back.
   def record(db, _request, {:ok, %{message_id: id}}, state, _at),
